@@ -62,12 +62,39 @@ const ROOM_THEMES = [
   },
   {
     type: 'study',
-    name: 'Reading Den',
+    name: 'Home Office',
     icon: '📚',
     wallColor: [236, 218, 206],
     floorColor: [142, 98, 66],
     rugColor: [176, 96, 82],
     trimColor: [244, 238, 232],
+  },
+  {
+    type: 'sunroom',
+    name: 'Garden Sunroom',
+    icon: '🌿',
+    wallColor: [216, 240, 224],
+    floorColor: [176, 138, 98],
+    rugColor: [92, 168, 118],
+    trimColor: [248, 250, 244],
+  },
+  {
+    type: 'loft',
+    name: 'Starlight Loft',
+    icon: '✨',
+    wallColor: [212, 222, 242],
+    floorColor: [154, 112, 82],
+    rugColor: [106, 118, 192],
+    trimColor: [246, 246, 252],
+  },
+  {
+    type: 'music',
+    name: 'Music & Craft Studio',
+    icon: '🎨',
+    wallColor: [244, 226, 210],
+    floorColor: [164, 118, 78],
+    rugColor: [212, 116, 88],
+    trimColor: [250, 245, 240],
   },
 ];
 
@@ -107,44 +134,49 @@ export class ProceduralHouse {
   constructor(levelNumber = 1, seed = Date.now()) {
     this.levelNumber = levelNumber;
     this.rng = new SeededRNG(seed);
-    this.houseName = `House #${levelNumber} — ${this.rng.pick(HOUSE_NAMES)}`;
 
-    this.roomSize = 6.0; // Each room is 6m x 6m
-    this.wallHeight = 3.0; // 3m ceiling height
-    this.doorWidth = 1.6;
-    this.doorHeight = 2.25;
+    this.roomSize = 7.2; // Spacious 7.2m x 7.2m rooms so staircases & furniture have plenty of room!
+    this.wallHeight = 3.0; // 3m ceiling height per story
+    this.doorWidth = 1.68;
+    this.doorHeight = 2.28;
     this.ambientLevel = 0.36;
 
-    this.rooms = []; // Grid rooms
-    this.roomMap = new Map(); // "gx,gz" -> room
-    this.interactives = []; // All clickable / toggleable fans, lights, switches, exit door
+    // Occasionally generate a 2-Story House! (Every even level or ~45% chance)
+    this.hasSecondFloor = (levelNumber % 2 === 0) || (this.rng.next() < 0.45);
+    const storyTag = this.hasSecondFloor ? ' (2-Story!)' : '';
+    this.houseName = `House #${levelNumber} — ${this.rng.pick(HOUSE_NAMES)}${storyTag}`;
+
+    this.rooms = []; // All rooms across 1st and 2nd floors
+    this.roomMap = new Map(); // "floor,gx,gz" -> room
+    this.interactives = []; // All clickable / toggleable fans, lights, switches, stairs, exit door
     this.interactiveById = new Map();
-    this.colliders = []; // 2D AABB boxes for furniture & walls
+    this.colliders = []; // 2D AABB boxes per floor for furniture & walls
     this.breezeParticles = []; // Floating dust/wind motes propelled by active fans
     this.checklist = []; // Kid-friendly level goals
     this.exitUnlocked = false;
     this.exitDoor = null;
+    this.stairwell = null; // Continuous walkable 3D staircase ramp between 1st and 2nd floor!
 
     this.generateFloorplan();
     this.populateRooms();
     this.generateChecklist();
   }
 
-  gridKey(gx, gz) {
-    return `${gx},${gz}`;
+  gridKey(gx, gz, floor = 0) {
+    return `${floor},${gx},${gz}`;
   }
 
   generateFloorplan() {
-    // Number of rooms scales gently from 4 rooms on Level 1 up to 6 rooms
-    const numRooms = Math.min(6, 4 + Math.floor((this.levelNumber - 1) / 2));
+    // Ground floor (floor 0) ALWAYS has 6 rooms!
+    const groundFloorRoomsCount = 6;
 
-    // Start at (0, 0) with the Front Hallway / Foyer
+    // Start at (0, 0) on Floor 0 with the Front Hallway / Foyer
     const foyerTheme = ROOM_THEMES[0];
     const otherThemes = this.rng.shuffle(ROOM_THEMES.slice(1));
 
-    const startRoom = this.createRoom(0, 0, foyerTheme);
+    const startRoom = this.createRoom(0, 0, foyerTheme, 0);
     this.rooms.push(startRoom);
-    this.roomMap.set(this.gridKey(0, 0), startRoom);
+    this.roomMap.set(this.gridKey(0, 0, 0), startRoom);
 
     const dirs = [
       { dx: 0, dz: 1, side: 'north', opp: 'south' },
@@ -154,8 +186,9 @@ export class ProceduralHouse {
     ];
 
     let themeIdx = 0;
-    while (this.rooms.length < numRooms) {
-      const baseRoom = this.rng.pick(this.rooms);
+    const floor0Rooms = [startRoom];
+    while (floor0Rooms.length < groundFloorRoomsCount) {
+      const baseRoom = this.rng.pick(floor0Rooms);
       const shuffledDirs = this.rng.shuffle(dirs);
 
       for (const d of shuffledDirs) {
@@ -164,12 +197,13 @@ export class ProceduralHouse {
 
         const nx = baseRoom.gx + d.dx;
         const nz = baseRoom.gz + d.dz;
-        const key = this.gridKey(nx, nz);
+        const key = this.gridKey(nx, nz, 0);
 
         if (!this.roomMap.has(key)) {
           const theme = otherThemes[themeIdx % otherThemes.length];
           themeIdx++;
-          const newRoom = this.createRoom(nx, nz, theme);
+          const newRoom = this.createRoom(nx, nz, theme, 0);
+          floor0Rooms.push(newRoom);
           this.rooms.push(newRoom);
           this.roomMap.set(key, newRoom);
           break;
@@ -177,39 +211,335 @@ export class ProceduralHouse {
       }
     }
 
-    // Connect all adjacent rooms with open doorways
+    // Occasionally add a Second Floor (Upstairs, floor = 1) with a dedicated Grand Staircase Hall!
+    if (this.hasSecondFloor) {
+      // Pick an exterior leaf room on Floor 0 (or attach a dedicated Staircase Hallway leaf room)
+      // so the staircase sits cleanly in the center of the room, far away from walls, and NEVER blocks any doorway!
+      const stairHallTheme = {
+        type: 'stair_hall',
+        name: 'Grand Staircase Hall',
+        icon: '🪜',
+        wallColor: [238, 230, 214],
+        floorColor: [164, 120, 82],
+        rugColor: [188, 86, 72],
+        trimColor: [248, 245, 238],
+      };
+
+      // Attach the 1st-Floor Grand Staircase Hall off the North or East/West of an existing Floor 0 room
+      // so it only has ONE doorway (at its South or entry side) and a completely clear center for the grand staircase!
+      let stairRoom0 = null;
+      const candidateParents = this.rng.shuffle(floor0Rooms);
+      // Prefer a North expansion (dx=0, dz=1) so you walk straight North through the doorway and right up the center stairs!
+      const stairDirs = [
+        { dx: 0, dz: 1, side: 'north', opp: 'south' },
+        { dx: 1, dz: 0, side: 'east', opp: 'west' },
+        { dx: -1, dz: 0, side: 'west', opp: 'east' },
+      ];
+      for (const parent of candidateParents) {
+        for (const d of stairDirs) {
+          const nx = parent.gx + d.dx;
+          const nz = parent.gz + d.dz;
+          const key0 = this.gridKey(nx, nz, 0);
+          if (!this.roomMap.has(key0)) {
+            stairRoom0 = this.createRoom(nx, nz, stairHallTheme, 0);
+            stairRoom0.hasStairsUp = true;
+            stairRoom0.stairEntrySide = d.opp; // 'south', 'west', or 'east'
+            this.rooms.push(stairRoom0);
+            this.roomMap.set(key0, stairRoom0);
+            break;
+          }
+        }
+        if (stairRoom0) break;
+      }
+
+      const upLandingTheme = {
+        type: 'stair_hall',
+        name: 'Upstairs Gallery Landing',
+        icon: '🪜',
+        wallColor: [236, 228, 214],
+        floorColor: [164, 120, 82],
+        rugColor: [194, 96, 78],
+        trimColor: [248, 245, 238],
+      };
+
+      const upLanding = this.createRoom(stairRoom0.gx, stairRoom0.gz, upLandingTheme, 1);
+      upLanding.hasStairsDown = true;
+      upLanding.stairEntrySide = stairRoom0.stairEntrySide;
+      const floor1Rooms = [upLanding];
+      this.rooms.push(upLanding);
+      this.roomMap.set(this.gridKey(upLanding.gx, upLanding.gz, 1), upLanding);
+
+      // Add 2 to 3 upstairs rooms connected to the Upstairs Gallery Landing
+      // (Never place an upstairs room on the side where the bottom of the stairs is, so the top landing doorway is never blocked!)
+      const numUpstairsRooms = this.rng.int(3, 4);
+      while (floor1Rooms.length < numUpstairsRooms) {
+        const baseRoom = this.rng.pick(floor1Rooms);
+        const shuffledDirs = this.rng.shuffle(dirs);
+
+        for (const d of shuffledDirs) {
+          // On the Upstairs Gallery Landing itself, keep the South wall (foot-of-stairs side) free of doors
+          // so all upstairs doorways open off the wide Upper Landing!
+          if (baseRoom === upLanding && d.side === 'south') continue;
+
+          const nx = baseRoom.gx + d.dx;
+          const nz = baseRoom.gz + d.dz;
+          const key = this.gridKey(nx, nz, 1);
+
+          if (!this.roomMap.has(key)) {
+            const rawTheme = otherThemes[themeIdx % otherThemes.length];
+            themeIdx++;
+            const upTheme = {
+              ...rawTheme,
+              name: `Upstairs ${rawTheme.name}`,
+            };
+            const newUpRoom = this.createRoom(nx, nz, upTheme, 1);
+            floor1Rooms.push(newUpRoom);
+            this.rooms.push(newUpRoom);
+            this.roomMap.set(key, newUpRoom);
+            break;
+          }
+        }
+      }
+    }
+
+    // Connect adjacent rooms on the SAME floor with open doorways
+    // IMPORTANT: For the 1st-Floor Grand Staircase Hall (hasStairsUp), ONLY open the door to its entry side (or South/East/West),
+    // keeping its North wall (top of the stairs) solid so the staircase NEVER blocks a 1st-floor doorway!
     for (const room of this.rooms) {
       for (const d of dirs) {
-        const neighbor = this.roomMap.get(this.gridKey(room.gx + d.dx, room.gz + d.dz));
+        if (room.hasStairsUp && d.side === 'north') continue;
+        if (room.hasStairsDown && d.side === 'south') continue;
+
+        const neighbor = this.roomMap.get(
+          this.gridKey(room.gx + d.dx, room.gz + d.dz, room.floor)
+        );
         if (neighbor) {
+          if (neighbor.hasStairsUp && d.opp === 'north') continue;
+          if (neighbor.hasStairsDown && d.opp === 'south') continue;
           room.doors[d.side] = true;
         }
       }
     }
+
+    // Apply variable luxury room sizes (1.5x Grand Staircase Hall & up to 2x Grand Luxury Rooms)!
+    this.applyVariableRoomSizes();
   }
 
-  createRoom(gx, gz, theme) {
+  createRoom(gx, gz, theme, floor = 0, scaleX = 1.0, scaleZ = 1.0) {
     const cx = gx * this.roomSize;
     const cz = gz * this.roomSize;
+    const baseY = floor * this.wallHeight;
+    const sizeX = this.roomSize * scaleX;
+    const sizeZ = this.roomSize * scaleZ;
     return {
-      id: `room_${gx}_${gz}`,
+      id: `room_f${floor}_${gx}_${gz}`,
+      floor,
+      baseY,
       gx,
       gz,
       cx,
       cz,
-      minX: cx - this.roomSize * 0.5,
-      maxX: cx + this.roomSize * 0.5,
-      minZ: cz - this.roomSize * 0.5,
-      maxZ: cz + this.roomSize * 0.5,
+      sizeX,
+      sizeZ,
+      scaleX,
+      scaleZ,
+      isLuxurySize: scaleX > 1.35 || scaleZ > 1.35,
+      minX: cx - sizeX * 0.5,
+      maxX: cx + sizeX * 0.5,
+      minZ: cz - sizeZ * 0.5,
+      maxZ: cz + sizeZ * 0.5,
       theme,
       name: theme.name,
       icon: theme.icon,
       doors: { north: false, south: false, east: false, west: false },
+      doorCenters: { north: cx, south: cx, east: cz, west: cz },
+      hasStairsUp: false,
+      hasStairsDown: false,
       furniture: [],
       ceilingFan: null,
+      extraCeilingFan: null,
       portableFan: null,
       lights: [],
     };
+  }
+
+  // Expand exterior rooms into 1.5x Staircase Halls or up to 2x Luxury Grand Rooms
+  // using strict 2D AABB collision checks so expanded rooms NEVER overlap another room!
+  applyVariableRoomSizes() {
+    // Check if candidate rectangle [minX, maxX] x [minZ, maxZ] overlaps any other room on the given floor(s)
+    const canExpandTo = (room, candMinX, candMaxX, candMinZ, candMaxZ, checkBothFloors = false) => {
+      const eps = 0.05; // Allow shared walls to touch flush, but forbid any interior overlap!
+      for (const other of this.rooms) {
+        if (other === room) continue;
+        // Skip the paired stairwell counterpart on the other floor (we sync those explicitly)
+        if (checkBothFloors && other.gx === room.gx && other.gz === room.gz) continue;
+        if (!checkBothFloors && other.floor !== room.floor) continue;
+
+        const overlapX = candMinX < other.maxX - eps && candMaxX > other.minX + eps;
+        const overlapZ = candMinZ < other.maxZ - eps && candMaxZ > other.minZ + eps;
+        if (overlapX && overlapZ) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    // Pass 1: Expand the Grand Staircase Hall (and its paired Upstairs Gallery Landing) by 1.5x first
+    const stairRoom0 = this.rooms.find((r) => r.hasStairsUp);
+    const stairRoom1 = this.rooms.find((r) => r.hasStairsDown);
+    if (stairRoom0) {
+      const extraSide = this.roomSize * 0.25; // +1.8m
+      const extraDepth = this.roomSize * 0.5; // +3.6m (1.5x room depth)
+
+      // Try expanding North, South, West, and East only if no room on Floor 0 or Floor 1 is in the way
+      if (
+        !stairRoom0.doors.north &&
+        !(stairRoom1 && stairRoom1.doors.north) &&
+        canExpandTo(stairRoom0, stairRoom0.minX, stairRoom0.maxX, stairRoom0.minZ, stairRoom0.maxZ + extraDepth, true)
+      ) {
+        stairRoom0.maxZ += extraDepth;
+        if (stairRoom1) stairRoom1.maxZ = stairRoom0.maxZ;
+      } else if (
+        !stairRoom0.doors.south &&
+        !(stairRoom1 && stairRoom1.doors.south) &&
+        canExpandTo(stairRoom0, stairRoom0.minX, stairRoom0.maxX, stairRoom0.minZ - extraDepth, stairRoom0.maxZ, true)
+      ) {
+        stairRoom0.minZ -= extraDepth;
+        if (stairRoom1) stairRoom1.minZ = stairRoom0.minZ;
+      }
+
+      if (
+        !stairRoom0.doors.west &&
+        !(stairRoom1 && stairRoom1.doors.west) &&
+        canExpandTo(stairRoom0, stairRoom0.minX - extraSide, stairRoom0.maxX, stairRoom0.minZ, stairRoom0.maxZ, true)
+      ) {
+        stairRoom0.minX -= extraSide;
+        if (stairRoom1) stairRoom1.minX = stairRoom0.minX;
+      }
+
+      if (
+        !stairRoom0.doors.east &&
+        !(stairRoom1 && stairRoom1.doors.east) &&
+        canExpandTo(stairRoom0, stairRoom0.minX, stairRoom0.maxX + extraSide, stairRoom0.minZ, stairRoom0.maxZ, true)
+      ) {
+        stairRoom0.maxX += extraSide;
+        if (stairRoom1) stairRoom1.maxX = stairRoom0.maxX;
+      }
+    }
+
+    // Pass 2: Shape rooms into realistic architectural proportions (compact kitchens, rectangular offices/bedrooms/living rooms, and square rooms!)
+    for (const room of this.rooms) {
+      const isStairHall = room.hasStairsUp || room.hasStairsDown;
+      const isFoyer = room.gx === 0 && room.gz === 0 && room.floor === 0;
+      const t = room.theme.type;
+
+      // Helper to try expanding a single side by `amount`
+      const tryExpandSide = (side, amount) => {
+        if (amount <= 0 || room.doors[side]) return false;
+        let cMinX = room.minX, cMaxX = room.maxX, cMinZ = room.minZ, cMaxZ = room.maxZ;
+        if (side === 'north') cMaxZ += amount;
+        else if (side === 'south') cMinZ -= amount;
+        else if (side === 'east') cMaxX += amount;
+        else if (side === 'west') cMinX -= amount;
+
+        if (canExpandTo(room, cMinX, cMaxX, cMinZ, cMaxZ)) {
+          room.minX = cMinX;
+          room.maxX = cMaxX;
+          room.minZ = cMinZ;
+          room.maxZ = cMaxZ;
+          return true;
+        }
+        return false;
+      };
+
+      if (!isStairHall && !isFoyer) {
+        if (t === 'kitchen') {
+          // Real-world Kitchen: compact & cozy! Occasionally a slightly rectangular galley/eat-in kitchen (+1.8m on one axis only), never huge!
+          const galleyExpand = this.roomSize * 0.25;
+          const sides = this.rng.shuffle(['north', 'south', 'east', 'west']);
+          for (const s of sides) {
+            if (tryExpandSide(s, galleyExpand)) break;
+          }
+        } else if (t === 'study' || t === 'music') {
+          // Real-world Home Office / Studio: rectangular office (+3.0m along one axis) or cozy square room
+          const officeExpand = this.roomSize * 0.42;
+          const sides = this.rng.shuffle(['north', 'south', 'east', 'west']);
+          for (const s of sides) {
+            if (tryExpandSide(s, officeExpand)) break;
+          }
+        } else {
+          // Living Room, Bedroom, Playroom, Sunroom, Loft:
+          // Make most of them distinctly RECTANGULAR (expanding 1.7x-2.0x along one primary axis, and 1.0x-1.25x on the perpendicular axis)
+          // while leaving some rooms square for natural floorplan variety!
+          const shapeRoll = this.rng.next();
+          const preferHorizontal = this.rng.next() < 0.5;
+          const primarySides = preferHorizontal
+            ? this.rng.shuffle(['east', 'west'])
+            : this.rng.shuffle(['north', 'south']);
+          const secondarySides = preferHorizontal
+            ? this.rng.shuffle(['north', 'south'])
+            : this.rng.shuffle(['east', 'west']);
+
+          const longExpand = this.roomSize * 0.85; // ~1.85x length along primary axis (distinct rectangle!)
+          const medExpand = this.roomSize * 0.52;  // ~1.52x length
+          const minorExpand = this.roomSize * 0.24; // slight width boost
+
+          if (shapeRoll < 0.78 || t === 'living' || t === 'bedroom') {
+            // Rectangular room: expand strongly along primary axis, keep secondary axis at 1.0x (or 1.24x for Grand Living Room)
+            let expandedPrimary = false;
+            for (const s of primarySides) {
+              if (tryExpandSide(s, longExpand) || tryExpandSide(s, medExpand)) {
+                expandedPrimary = true;
+                break;
+              }
+            }
+            // If primary axis was blocked by neighbors, try making it rectangular along the secondary axis instead!
+            if (!expandedPrimary) {
+              for (const s of secondarySides) {
+                if (tryExpandSide(s, longExpand) || tryExpandSide(s, medExpand)) {
+                  expandedPrimary = true;
+                  break;
+                }
+              }
+            } else if (t === 'living' && this.rng.next() < 0.5) {
+              // Living room can occasionally be a wider rectangle (e.g. 1.85x by 1.24x)
+              for (const s of secondarySides) {
+                if (tryExpandSide(s, minorExpand)) break;
+              }
+            }
+          } else {
+            // ~22% chance for non-living/bedroom rooms to be a large square or standard 1x square
+            for (const s of primarySides) {
+              if (tryExpandSide(s, medExpand)) break;
+            }
+            for (const s of secondarySides) {
+              if (tryExpandSide(s, medExpand)) break;
+            }
+          }
+        }
+      }
+
+      // Recompute room center and dimensions from updated bounds
+      // Keep original grid center for doorway alignment (`doorCenters`), while updating `cx, cz, sizeX, sizeZ`!
+      const origCx = room.gx * this.roomSize;
+      const origCz = room.gz * this.roomSize;
+      room.doorCenters = {
+        north: origCx,
+        south: origCx,
+        east: origCz,
+        west: origCz,
+      };
+      room.cx = (room.minX + room.maxX) * 0.5;
+      room.cz = (room.minZ + room.maxZ) * 0.5;
+      room.sizeX = room.maxX - room.minX;
+      room.sizeZ = room.maxZ - room.minZ;
+      room.isLuxurySize =
+        t !== 'kitchen' &&
+        (room.sizeX * room.sizeZ) > (this.roomSize * this.roomSize * 1.38);
+      if (room.isLuxurySize && !isStairHall && !room.name.includes('Grand')) {
+        room.name = `Grand ${room.name}`;
+      }
+    }
   }
 
   registerInteractive(obj) {
@@ -220,9 +550,16 @@ export class ProceduralHouse {
 
   populateRooms() {
     for (const room of this.rooms) {
+      const by = room.baseY;
+      const isStairHall = room.hasStairsUp || room.hasStairsDown;
       // 1. Every room gets a centerpiece Ceiling Fan with a Built-in Ceiling Light & Pull Chains!
+      // (In the 1st-floor Grand Staircase Hall, the ceiling is open to the 2nd floor above, so the Grand Ceiling Fan hangs from the high 2nd-floor ceiling!)
       const initialFanSpeed = this.rng.next() < 0.45 ? this.rng.int(1, 3) : 0;
       const initialLightOn = this.rng.next() < 0.55;
+
+      // Offset the fan slightly to the East gallery in Staircase Halls so pull chains hang over the flat walkway!
+      const fanX = isStairHall ? room.cx + 1.85 : room.cx;
+      const fanZ = room.cz;
 
       const ceilingFan = this.registerInteractive({
         id: `cfan_${room.id}`,
@@ -231,10 +568,10 @@ export class ProceduralHouse {
         room,
         name: `${room.name} Ceiling Fan`,
         icon: '🌀',
-        x: room.cx,
-        y: this.wallHeight - 0.35,
-        z: room.cz,
-        interactY: 1.75, // Pull chain height
+        x: fanX,
+        y: by + this.wallHeight - 0.35,
+        z: fanZ,
+        interactY: by + 1.75, // Pull chain height
         speed: initialFanSpeed, // 0=OFF, 1=LOW, 2=MED, 3=HIGH
         bladeAngle: this.rng.range(0, Math.PI * 2),
         currentAngularVel: FAN_SPEED_RAD_PER_SEC[initialFanSpeed],
@@ -250,10 +587,10 @@ export class ProceduralHouse {
         room,
         name: `${room.name} Ceiling Light`,
         icon: '💡',
-        x: room.cx,
-        y: this.wallHeight - 0.48,
-        z: room.cz,
-        interactY: 1.75,
+        x: fanX,
+        y: by + this.wallHeight - 0.48,
+        z: fanZ,
+        interactY: by + 1.75,
         isOn: initialLightOn,
         radius: 6.4,
         intensity: 0.78,
@@ -274,7 +611,7 @@ export class ProceduralHouse {
         this.breezeParticles.push({
           room,
           x: this.rng.range(room.minX + 0.6, room.maxX - 0.6),
-          y: this.rng.range(0.35, this.wallHeight - 0.4),
+          y: by + this.rng.range(0.35, this.wallHeight - 0.4),
           z: this.rng.range(room.minZ + 0.6, room.maxZ - 0.6),
           phase: this.rng.range(0, Math.PI * 2),
           size: this.rng.range(0.024, 0.045),
@@ -282,8 +619,8 @@ export class ProceduralHouse {
       }
     }
 
-    // 5. Place the Front Exit Door on the South wall of the Foyer (0, 0)
-    const foyer = this.roomMap.get('0,0');
+    // 5. Place the Front Exit Door on the South wall of the 1st-Floor Foyer (0, 0, floor 0)
+    const foyer = this.roomMap.get('0,0,0');
     this.exitDoor = this.registerInteractive({
       id: 'exit_door',
       kind: 'exit',
@@ -292,33 +629,35 @@ export class ProceduralHouse {
       name: 'Front Exit Door (Next House)',
       icon: '🚪',
       x: foyer.cx,
-      y: 1.15,
+      y: foyer.baseY + 1.15,
       z: foyer.minZ + 0.08,
-      interactY: 1.2,
+      interactY: foyer.baseY + 1.2,
     });
   }
 
   placeWallSwitchesForRoom(room, ceilingLight, ceilingFan) {
+    const by = room.baseY;
+    const dc = room.doorCenters || { north: room.cx, south: room.cx, east: room.cz, west: room.cz };
     // Pick a wall with a door (or North wall) and place a dual switch plate beside the doorframe
-    let swX = room.cx + 1.15;
+    let swX = dc.north + 1.15;
     let swZ = room.maxZ - 0.06;
     let normal = { x: 0, y: 0, z: -1 };
 
     if (room.doors.north) {
-      swX = room.cx + 1.15;
+      swX = dc.north + 1.15;
       swZ = room.maxZ - 0.05;
       normal = { x: 0, y: 0, z: -1 };
     } else if (room.doors.south) {
-      swX = room.cx - 1.15;
+      swX = dc.south - 1.15;
       swZ = room.minZ + 0.05;
       normal = { x: 0, y: 0, z: 1 };
     } else if (room.doors.east) {
       swX = room.maxX - 0.05;
-      swZ = room.cz - 1.15;
+      swZ = dc.east - 1.15;
       normal = { x: -1, y: 0, z: 0 };
     } else if (room.doors.west) {
       swX = room.minX + 0.05;
-      swZ = room.cz + 1.15;
+      swZ = dc.west + 1.15;
       normal = { x: 1, y: 0, z: 0 };
     }
 
@@ -331,9 +670,9 @@ export class ProceduralHouse {
       name: `${room.name} Light Switch`,
       icon: '🎚️',
       x: swX,
-      y: 1.25,
+      y: by + 1.25,
       z: swZ,
-      interactY: 1.25,
+      interactY: by + 1.25,
       normal,
     });
 
@@ -348,14 +687,15 @@ export class ProceduralHouse {
       name: `${room.name} Fan Wall Dial`,
       icon: '🎛️',
       x: swX + offsetX,
-      y: 1.25,
+      y: by + 1.25,
       z: swZ + offsetZ,
-      interactY: 1.25,
+      interactY: by + 1.25,
       normal,
     });
   }
 
   placeRoomFurnitureAndFixtures(room) {
+    const by = room.baseY;
     // Pick safe corners of the room (away from center and doorways)
     const corners = [
       { x: room.minX + 0.9, z: room.maxZ - 0.9, dirYaw: -Math.PI * 0.25 },
@@ -365,8 +705,11 @@ export class ProceduralHouse {
     ];
     const shuffledCorners = this.rng.shuffle(corners);
 
-    // Corner 1: Standing Oscillating Pedestal Fan OR Retro Box Fan
-    const fanCorner = shuffledCorners[0];
+    // Corner 1: Standing Oscillating Pedestal Fan OR Retro Box Fan (keep West stairwell clear if room has stairs!)
+    const availableCorners = (room.hasStairsUp || room.hasStairsDown)
+      ? shuffledCorners.filter((c) => c.x > room.cx)
+      : shuffledCorners;
+    const fanCorner = availableCorners[0];
     const isPedestal = this.rng.next() < 0.55;
     const initSpeed = this.rng.next() < 0.4 ? this.rng.int(1, 3) : 0;
 
@@ -378,9 +721,9 @@ export class ProceduralHouse {
       name: isPedestal ? `${room.name} Standing Fan` : `${room.name} Box Fan`,
       icon: isPedestal ? '🌬️' : '🧊',
       x: fanCorner.x,
-      y: isPedestal ? 1.15 : 0.42,
+      y: by + (isPedestal ? 1.15 : 0.42),
       z: fanCorner.z,
-      interactY: isPedestal ? 1.15 : 0.55,
+      interactY: by + (isPedestal ? 1.15 : 0.55),
       baseYaw: fanCorner.dirYaw,
       oscillatePhase: this.rng.range(0, Math.PI * 2),
       speed: initSpeed,
@@ -388,10 +731,10 @@ export class ProceduralHouse {
       currentAngularVel: FAN_SPEED_RAD_PER_SEC[initSpeed],
     });
     room.portableFan = portableFan;
-    this.addCollider(fanCorner.x, fanCorner.z, 0.35, 0.35);
+    this.addCollider(fanCorner.x, fanCorner.z, 0.35, 0.35, room.floor);
 
     // Corner 2: Cozy Floor Lamp or Table Lamp
-    const lampCorner = shuffledCorners[1];
+    const lampCorner = availableCorners[1] || shuffledCorners[1];
     const lampOn = this.rng.next() < 0.5;
     const floorLamp = this.registerInteractive({
       id: `flamp_${room.id}`,
@@ -401,9 +744,9 @@ export class ProceduralHouse {
       name: `${room.name} Cozy Floor Lamp`,
       icon: '🛋️',
       x: lampCorner.x,
-      y: 1.38,
+      y: by + 1.38,
       z: lampCorner.z,
-      interactY: 1.3,
+      interactY: by + 1.3,
       isOn: lampOn,
       radius: 4.8,
       intensity: 0.65,
@@ -412,19 +755,199 @@ export class ProceduralHouse {
       colorB: 0.62,
     });
     room.lights.push(floorLamp);
-    this.addCollider(lampCorner.x, lampCorner.z, 0.32, 0.32);
+    this.addCollider(lampCorner.x, lampCorner.z, 0.32, 0.32, room.floor);
 
-    // Corners 3 & 4: Rich Room-Specific Furniture + Plants + Wall Decor + Table/Nightstand Lamps!
+    // Corners 3 & 4: Rich Room-Specific Furniture (or Dedicated Center Grand Staircase!)
     const furnCornerA = shuffledCorners[2];
     const furnCornerB = shuffledCorners[3];
-    this.addFurnitureForTheme(room, furnCornerA, furnCornerB);
+
+    if (room.hasStairsUp || room.hasStairsDown) {
+      // Dedicated Grand Staircase Hall: keep all 4 walls and walkways spacious and uncluttered!
+      const eastCorners = corners.filter((c) => c.x > room.cx);
+      this.addPottedPlant(room, eastCorners[0].x, eastCorners[0].z);
+      if (room.hasStairsUp) {
+        this.buildClimbableStaircase(room);
+      }
+    } else {
+      this.addFurnitureForTheme(room, furnCornerA, furnCornerB);
+    }
+
     this.addWallDecorForRoom(room);
+  }
+
+  // Build a Dedicated Center Grand Staircase in the 1.5x Grand Staircase Hall!
+  // Placed right down the center of the room (x = room.cx), with >2.5m of clear space from both East and West walls,
+  // 2.2m of flat lower landing on the South side, and 2.5m of flat upper landing on the North side!
+  buildClimbableStaircase(stairRoom0) {
+    const stairX = stairRoom0.cx; // Centered horizontally in the 1.5x Grand Staircase Hall!
+    const stairHalfW = 0.92; // Wide, luxurious 1.84m grand staircase!
+    const zBottom = stairRoom0.minZ + 2.15; // 2.15m spacious flat lower landing at bottom of stairs
+    const zTop = stairRoom0.maxZ - 2.45; // 2.45m spacious flat upper landing at top of stairs!
+
+    this.stairwell = {
+      gx: stairRoom0.gx,
+      gz: stairRoom0.gz,
+      cx: stairX,
+      minX: stairX - stairHalfW,
+      maxX: stairX + stairHalfW,
+      zBottom,
+      zTop,
+    };
+
+    // Protective left and right side balustrade colliders along the stairwell
+    // leaving the wide bottom entry (z < zBottom) and wide top exit (z > zTop) completely open!
+    const railHalfLen = (zTop - zBottom) * 0.46;
+    const railMidZ = (zBottom + zTop) * 0.5;
+    for (const sideSign of [-1, 1]) {
+      const rx = stairX + sideSign * (stairHalfW + 0.06);
+      this.addCollider(rx, railMidZ, 0.07, railHalfLen, 0);
+      this.addCollider(rx, railMidZ, 0.07, railHalfLen, 1);
+    }
+
+    // Also place a protective back guardrail along the South edge of the 2nd-floor stairwell opening (z = zBottom)
+    // so on the 2nd floor you can walk around the East and West galleries without falling into the back of the stairwell!
+    this.addCollider(stairX, zBottom - 0.06, stairHalfW + 0.06, 0.07, 1);
+
+    // Build 14 wide, comfortable solid oak steps climbing from Floor 0 (y=0) to Floor 1 (y=3.0m)
+    const numSteps = 14;
+    const totalDepth = zTop - zBottom;
+    const stepD = totalDepth / numSteps;
+    const stepH = this.wallHeight / numSteps;
+
+    for (let s = 0; s < numSteps; s++) {
+      const treadY = (s + 1) * stepH;
+      const sz = zBottom + (s + 0.5) * stepD;
+
+      // Solid wooden step carriage block
+      this.addBox(
+        stairRoom0,
+        stairX,
+        treadY - stepH * 0.5,
+        sz,
+        stairHalfW * 1.94,
+        stepH + 0.02,
+        stepD + 0.02,
+        [146, 102, 66]
+      );
+      // Warm Oak Stair Tread on top
+      this.addBox(
+        stairRoom0,
+        stairX,
+        treadY - 0.015,
+        sz,
+        stairHalfW * 2.0,
+        0.045,
+        stepD + 0.04,
+        [208, 162, 110]
+      );
+    }
+
+    // Twin Wooden Handrail Baluster Posts on BOTH sides of the Grand Staircase!
+    for (const sideSign of [-1, 1]) {
+      const rx = stairX + sideSign * stairHalfW;
+      for (const frac of [0.06, 0.35, 0.65, 0.94]) {
+        const pz = zBottom + frac * totalDepth;
+        const py = frac * this.wallHeight;
+        this.addBox(
+          stairRoom0,
+          rx,
+          py + 0.45,
+          pz,
+          0.08,
+          0.9,
+          0.08,
+          [116, 76, 48]
+        );
+      }
+    }
+
+    // Upstairs Gallery Landing Guardrail Balustrades along Left, Right, and South (back) edges of the stairwell opening!
+    const upLanding = this.roomMap.get(this.gridKey(stairRoom0.gx, stairRoom0.gz, 1));
+    if (upLanding) {
+      for (const sideSign of [-1, 1]) {
+        const rx = stairX + sideSign * (stairHalfW + 0.06);
+        this.addBox(
+          upLanding,
+          rx,
+          0.46,
+          railMidZ,
+          0.09,
+          0.92,
+          (zTop - zBottom) * 0.96,
+          [136, 94, 60]
+        );
+        // White top handrail cap
+        this.addBox(
+          upLanding,
+          rx,
+          0.95,
+          railMidZ,
+          0.12,
+          0.06,
+          (zTop - zBottom) * 0.98,
+          [246, 242, 235]
+        );
+      }
+      // South guardrail closing the back of the stairwell opening on the 2nd floor
+      this.addBox(
+        upLanding,
+        stairX,
+        0.46,
+        zBottom - 0.05,
+        stairHalfW * 2.08,
+        0.92,
+        0.09,
+        [136, 94, 60]
+      );
+      this.addBox(
+        upLanding,
+        stairX,
+        0.95,
+        zBottom - 0.05,
+        stairHalfW * 2.12,
+        0.06,
+        0.12,
+        [246, 242, 235]
+      );
+    }
+  }
+
+  // Returns the player's floor elevation (0.0 to 3.0m) at world position (x, z)
+  getFloorElevation(x, z, currentFloor = 0) {
+    if (this.stairwell) {
+      const sw = this.stairwell;
+      // Check if the player is inside the stairwell room and aligned with the center staircase
+      if (
+        x >= sw.minX - 0.25 &&
+        x <= sw.maxX + 0.25 &&
+        z >= sw.zBottom - 0.45 &&
+        z <= sw.zTop + 0.45
+      ) {
+        const t = Math.max(0, Math.min(1, (z - sw.zBottom) / (sw.zTop - sw.zBottom)));
+        return t * this.wallHeight;
+      }
+    }
+    return currentFloor * this.wallHeight;
+  }
+
+  isOnStaircase(x, z) {
+    if (!this.stairwell) return false;
+    const sw = this.stairwell;
+    return (
+      x >= sw.minX - 0.25 &&
+      x <= sw.maxX + 0.25 &&
+      z >= sw.zBottom - 0.35 &&
+      z <= sw.zTop + 0.35
+    );
   }
 
   addBox(room, x, y, z, w, h, d, color, options = {}) {
     room.furniture.push({
       kind: 'box',
-      x, y, z, w, h, d, color,
+      x,
+      y: room.baseY + y,
+      z,
+      w, h, d, color,
       emissive: options.emissive || false,
       layer: options.layer ?? 10,
     });
@@ -438,10 +961,11 @@ export class ProceduralHouse {
     this.addBox(room, x, 0.52, z, 0.46, 0.32, 0.46, [68, 152, 88]);
     this.addBox(room, x + 0.04, 0.76, z - 0.03, 0.32, 0.28, 0.32, [86, 176, 102]);
     this.addBox(room, x - 0.03, 0.96, z + 0.03, 0.18, 0.2, 0.18, [106, 196, 118]);
-    this.addCollider(x, z, 0.25, 0.25);
+    this.addCollider(x, z, 0.25, 0.25, room.floor);
   }
 
   addDeskLamp(room, x, baseTopY, z, labelName) {
+    const by = room.baseY;
     const isOn = this.rng.next() < 0.55;
     const lamp = this.registerInteractive({
       id: `dlamp_${room.id}_${Math.round(x * 10)}_${Math.round(z * 10)}`,
@@ -451,10 +975,10 @@ export class ProceduralHouse {
       name: `${room.name} ${labelName}`,
       icon: '🏮',
       x,
-      y: baseTopY + 0.34,
+      y: by + baseTopY + 0.34,
       z,
-      baseTopY,
-      interactY: baseTopY + 0.25,
+      baseTopY: by + baseTopY,
+      interactY: by + baseTopY + 0.25,
       isOn,
       radius: 4.2,
       intensity: 0.58,
@@ -466,12 +990,13 @@ export class ProceduralHouse {
   }
 
   addWallDecorForRoom(room) {
-    // Place windows on exterior walls (walls without a connecting door, excluding the Foyer south exit wall)
+    // Place windows on exterior walls (walls without a connecting door, excluding the Foyer south exit wall and West stairwell wall)
+    const hasStairwell = room.hasStairsUp || room.hasStairsDown;
     const wallSpecs = [
       { side: 'north', hasDoor: room.doors.north, isExit: false },
-      { side: 'south', hasDoor: room.doors.south, isExit: room.gx === 0 && room.gz === 0 },
+      { side: 'south', hasDoor: room.doors.south, isExit: room.gx === 0 && room.gz === 0 && room.floor === 0 },
       { side: 'east', hasDoor: room.doors.east, isExit: false },
-      { side: 'west', hasDoor: room.doors.west, isExit: false },
+      { side: 'west', hasDoor: room.doors.west || hasStairwell, isExit: false },
     ];
 
     let windowAdded = false;
@@ -549,94 +1074,172 @@ export class ProceduralHouse {
     }
   }
 
+  // Build a realistic wooden bookshelf with top/bottom trim and 3 colorful book rows (non-overlapping boxes!)
+  addBookshelf(room, x, z, frontSignZ = 1, width = 1.24, height = 1.72) {
+    const woodColor = [142, 94, 58];
+    const trimColor = [122, 78, 46];
+    const depth = 0.44;
+    // Main bookcase body
+    this.addBox(room, x, height * 0.5, z, width, height, depth, woodColor);
+    // Crown top cap sitting cleanly above main body
+    this.addBox(room, x, height + 0.03, z, width + 0.06, 0.06, depth + 0.04, trimColor);
+    // 3 rows of colorful book spines protruding cleanly on the front face
+    const faceZ = z + frontSignZ * (depth * 0.5 + 0.03);
+    this.addBox(room, x - width * 0.2, 0.48, faceZ, width * 0.38, 0.28, 0.06, [224, 88, 78]);
+    this.addBox(room, x + width * 0.22, 0.46, faceZ, width * 0.32, 0.24, 0.06, [238, 178, 74]);
+    this.addBox(room, x + width * 0.16, 0.96, faceZ, width * 0.44, 0.28, 0.06, [74, 158, 210]);
+    this.addBox(room, x - width * 0.24, 0.94, faceZ, width * 0.28, 0.24, 0.06, [156, 108, 192]);
+    this.addBox(room, x - width * 0.14, 1.42, faceZ, width * 0.46, 0.26, 0.06, [88, 182, 118]);
+    this.addBox(room, x + width * 0.24, 1.40, faceZ, width * 0.26, 0.22, 0.06, [232, 132, 78]);
+    this.addCollider(x, z, width * 0.5 + 0.04, depth * 0.5 + 0.06, room.floor);
+  }
+
   addFurnitureForTheme(room, cornerA, cornerB) {
     const t = room.theme.type;
     const zBackA = cornerA.z > room.cz ? 0.25 : -0.25;
     const zBackB = cornerB.z > room.cz ? 0.25 : -0.25;
+    const frontSignA = cornerA.z > room.cz ? -1 : 1;
+    const frontSignB = cornerB.z > room.cz ? -1 : 1;
+    const inwardSignXA = cornerA.x < room.cx ? 1 : -1;
+    const inwardSignXB = cornerB.x < room.cx ? 1 : -1;
 
     if (t === 'living') {
-      // Corner A: Plush Sofa with Backrest, Armrests & Throw Pillows (non-overlapping boxes so no Z-fighting!)
-      this.addBox(room, cornerA.x, 0.24, cornerA.z, 1.16, 0.48, 0.76, [78, 118, 168]);
-      this.addBox(room, cornerA.x, 0.69, cornerA.z + zBackA, 1.56, 0.42, 0.24, [64, 102, 150]);
-      // Armrests sitting cleanly to the left and right of the seat cushion
-      this.addBox(room, cornerA.x - 0.68, 0.34, cornerA.z, 0.2, 0.68, 0.78, [64, 102, 150]);
-      this.addBox(room, cornerA.x + 0.68, 0.34, cornerA.z, 0.2, 0.68, 0.78, [64, 102, 150]);
-      // Colorful Throw Cushions sitting cleanly on top of the seat
-      this.addBox(room, cornerA.x - 0.36, 0.59, cornerA.z - zBackA * 0.25, 0.3, 0.22, 0.22, [242, 178, 72]);
-      this.addBox(room, cornerA.x + 0.36, 0.59, cornerA.z - zBackA * 0.25, 0.3, 0.22, 0.22, [232, 108, 92]);
-      this.addCollider(cornerA.x, cornerA.z, 0.8, 0.44);
+      // Corner A: Plush Living Room Sofa with Backrest, Armrests & Throw Pillows (non-overlapping boxes!)
+      this.addBox(room, cornerA.x, 0.24, cornerA.z, 1.24, 0.48, 0.76, [78, 118, 168]);
+      this.addBox(room, cornerA.x, 0.69, cornerA.z + zBackA, 1.64, 0.42, 0.24, [64, 102, 150]);
+      this.addBox(room, cornerA.x - 0.72, 0.34, cornerA.z, 0.2, 0.68, 0.78, [64, 102, 150]);
+      this.addBox(room, cornerA.x + 0.72, 0.34, cornerA.z, 0.2, 0.68, 0.78, [64, 102, 150]);
+      this.addBox(room, cornerA.x - 0.38, 0.59, cornerA.z - zBackA * 0.25, 0.3, 0.22, 0.22, [242, 178, 72]);
+      this.addBox(room, cornerA.x + 0.38, 0.59, cornerA.z - zBackA * 0.25, 0.3, 0.22, 0.22, [232, 108, 92]);
+      this.addCollider(cornerA.x, cornerA.z, 0.84, 0.44, room.floor);
+
+      // Wooden Coffee Table right in front of the Sofa
+      const ctZ = cornerA.z + frontSignA * 0.98;
+      this.addBox(room, cornerA.x, 0.21, ctZ, 0.96, 0.42, 0.48, [154, 106, 68]);
+      this.addBox(room, cornerA.x, 0.45, ctZ, 1.04, 0.06, 0.54, [178, 126, 82]);
+      // Art book resting on top of coffee table
+      this.addBox(room, cornerA.x - 0.16, 0.505, ctZ, 0.32, 0.05, 0.24, [218, 96, 84]);
+      this.addCollider(cornerA.x, ctZ, 0.54, 0.3, room.floor);
 
       // Corner B: TV Media Console + Widescreen TV
-      this.addBox(room, cornerB.x, 0.28, cornerB.z, 1.35, 0.56, 0.55, [128, 86, 56]);
-      // Widescreen TV Bezel & Screen (screen placed cleanly in front of bezel toward room center)
-      const tvFrontSign = cornerB.z > room.cz ? -1 : 1;
-      this.addBox(room, cornerB.x, 0.92, cornerB.z, 1.08, 0.62, 0.07, [34, 38, 48]);
-      this.addBox(room, cornerB.x, 0.92, cornerB.z + tvFrontSign * 0.05, 0.96, 0.5, 0.03, [74, 138, 184]);
-      this.addCollider(cornerB.x, cornerB.z, 0.7, 0.35);
+      this.addBox(room, cornerB.x, 0.28, cornerB.z, 1.38, 0.56, 0.54, [128, 86, 56]);
+      this.addBox(room, cornerB.x, 0.92, cornerB.z, 1.12, 0.64, 0.07, [34, 38, 48]);
+      this.addBox(room, cornerB.x, 0.92, cornerB.z + frontSignB * 0.05, 1.0, 0.52, 0.03, [74, 138, 184]);
+      this.addCollider(cornerB.x, cornerB.z, 0.72, 0.35, room.floor);
     } else if (t === 'bedroom') {
-      // Corner A: Cozy Bed with Wooden Headboard, Mattress, Blanket & Pillows (non-overlapping!)
+      // Real-World Bedroom Layout:
+      // Corner A: Cozy Bed + Attached Bedside Nightstand with Interactive Bedside Table Lamp!
+      const bedX = cornerA.x - inwardSignXA * 0.08;
       // Upper mattress section (under pillows)
-      this.addBox(room, cornerA.x, 0.26, cornerA.z + zBackA * 1.4, 1.38, 0.52, 0.76, [242, 238, 246]);
-      // Lower blanket section
-      this.addBox(room, cornerA.x, 0.27, cornerA.z - zBackA * 0.65, 1.4, 0.54, 1.04, [148, 106, 186]);
+      this.addBox(room, bedX, 0.26, cornerA.z + zBackA * 1.4, 1.36, 0.52, 0.76, [242, 238, 246]);
+      // Lower duvet blanket section
+      this.addBox(room, bedX, 0.27, cornerA.z - zBackA * 0.65, 1.38, 0.54, 1.04, [148, 106, 186]);
       // Wooden Headboard behind mattress
-      this.addBox(room, cornerA.x, 0.64, cornerA.z + zBackA * 3.1, 1.42, 0.78, 0.14, [118, 78, 52]);
+      this.addBox(room, bedX, 0.64, cornerA.z + zBackA * 3.1, 1.42, 0.78, 0.14, [118, 78, 52]);
       // Twin Pillows sitting cleanly on top of upper mattress
-      this.addBox(room, cornerA.x - 0.34, 0.59, cornerA.z + zBackA * 1.6, 0.48, 0.14, 0.34, [252, 250, 255]);
-      this.addBox(room, cornerA.x + 0.34, 0.59, cornerA.z + zBackA * 1.6, 0.48, 0.14, 0.34, [252, 250, 255]);
-      this.addCollider(cornerA.x, cornerA.z, 0.72, 0.85);
+      this.addBox(room, bedX - 0.34, 0.59, cornerA.z + zBackA * 1.6, 0.48, 0.14, 0.34, [252, 250, 255]);
+      this.addBox(room, bedX + 0.34, 0.59, cornerA.z + zBackA * 1.6, 0.48, 0.14, 0.34, [252, 250, 255]);
+      this.addCollider(bedX, cornerA.z, 0.72, 0.85, room.floor);
 
-      // Corner B: Nightstand + Interactive Bedside Table Lamp!
-      const nsFrontSign = cornerB.z > room.cz ? -1 : 1;
-      this.addBox(room, cornerB.x, 0.34, cornerB.z, 0.68, 0.68, 0.6, [132, 92, 62]);
-      this.addBox(room, cornerB.x, 0.44, cornerB.z + nsFrontSign * 0.32, 0.52, 0.22, 0.04, [158, 114, 78]);
-      this.addDeskLamp(room, cornerB.x, 0.68, cornerB.z, 'Bedside Table Lamp');
-      this.addCollider(cornerB.x, cornerB.z, 0.4, 0.38);
+      // Bedside Nightstand + Interactive Bedside Table Lamp tucked beside the head of the bed!
+      const nsX = bedX + inwardSignXA * 1.04;
+      const nsZ = cornerA.z + zBackA * 1.35;
+      this.addBox(room, nsX, 0.32, nsZ, 0.52, 0.64, 0.48, [132, 92, 62]);
+      this.addBox(room, nsX, 0.42, nsZ + frontSignA * 0.26, 0.4, 0.2, 0.04, [158, 114, 78]);
+      this.addDeskLamp(room, nsX, 0.64, nsZ, 'Bedside Table Lamp');
+      this.addCollider(nsX, nsZ, 0.3, 0.28, room.floor);
+
+      // Corner B: Bedroom Bookshelves (Tall Wooden Bookcase + Companion Low Bookcase along the side wall!)
+      this.addBookshelf(room, cornerB.x, cornerB.z, frontSignB, 1.24, 1.72);
+      const secondShelfZ = cornerB.z + frontSignB * 1.18;
+      if (Math.abs(secondShelfZ - room.doorCenters.east) > 1.35 && Math.abs(secondShelfZ - room.doorCenters.west) > 1.35) {
+        this.addBookshelf(room, cornerB.x, secondShelfZ, frontSignB, 0.92, 1.24);
+      }
     } else if (t === 'kitchen') {
-      // Corner A: Kitchen Counter with Sink Basin, Stove Burners & Countertop
-      this.addBox(room, cornerA.x, 0.44, cornerA.z, 1.48, 0.88, 0.76, [224, 148, 82]);
-      this.addBox(room, cornerA.x, 0.92, cornerA.z, 1.56, 0.08, 0.82, [246, 244, 238]);
-      // Sink Basin & Faucet sitting cleanly above countertop (y=0.96+)
-      this.addBox(room, cornerA.x - 0.36, 0.985, cornerA.z, 0.48, 0.05, 0.44, [175, 192, 206]);
-      this.addBox(room, cornerA.x - 0.36, 1.12, cornerA.z + zBackA * 0.6, 0.06, 0.22, 0.06, [155, 168, 182]);
-      // Stove Cooktop sitting cleanly above countertop
+      // Real-World Kitchen Layout (Compact, Ceramic Tile Floor with NO Rug, Perimeter Counter & Fridge, + Center Kitchen Island!):
+      // 1. Corner A: Perimeter Kitchen Counter with Stainless Sink, Faucet & Stove Cooktop
+      this.addBox(room, cornerA.x, 0.44, cornerA.z, 1.52, 0.88, 0.76, [224, 148, 82]);
+      this.addBox(room, cornerA.x, 0.92, cornerA.z, 1.6, 0.08, 0.82, [246, 244, 238]);
+      this.addBox(room, cornerA.x - 0.38, 0.985, cornerA.z, 0.48, 0.05, 0.44, [175, 192, 206]);
+      this.addBox(room, cornerA.x - 0.38, 1.12, cornerA.z + zBackA * 0.6, 0.06, 0.22, 0.06, [155, 168, 182]);
       this.addBox(room, cornerA.x + 0.38, 0.98, cornerA.z, 0.52, 0.04, 0.48, [48, 52, 62]);
-      this.addCollider(cornerA.x, cornerA.z, 0.78, 0.44);
+      this.addCollider(cornerA.x, cornerA.z, 0.8, 0.44, room.floor);
 
-      // Corner B: Tall Retro Refrigerator!
-      const frFrontSign = cornerB.z > room.cz ? -1 : 1;
+      // 2. Corner B: Tall Retro Refrigerator
       this.addBox(room, cornerB.x, 0.88, cornerB.z, 0.82, 1.76, 0.74, [238, 244, 248]);
-      // Freezer door divider & handles placed cleanly on the front door face
-      this.addBox(room, cornerB.x, 1.24, cornerB.z + frFrontSign * 0.39, 0.82, 0.04, 0.04, [170, 182, 194]);
-      this.addBox(room, cornerB.x - 0.28, 1.48, cornerB.z + frFrontSign * 0.4, 0.05, 0.28, 0.06, [185, 196, 208]);
-      this.addBox(room, cornerB.x - 0.28, 0.82, cornerB.z + frFrontSign * 0.4, 0.05, 0.44, 0.06, [185, 196, 208]);
-      this.addCollider(cornerB.x, cornerB.z, 0.45, 0.45);
-    } else if (t === 'study' || t === 'playroom') {
-      // Corner A: Tall Bookshelf with Colorful Book Rows placed cleanly on the front face
-      const bsFrontSign = cornerA.z > room.cz ? -1 : 1;
-      this.addBox(room, cornerA.x, 0.84, cornerA.z, 1.24, 1.68, 0.46, [146, 98, 62]);
-      // Colorful Book Stacks protruding cleanly on the front shelf side
-      this.addBox(room, cornerA.x - 0.25, 0.55, cornerA.z + bsFrontSign * 0.25, 0.46, 0.28, 0.06, [226, 92, 82]);
-      this.addBox(room, cornerA.x + 0.22, 1.02, cornerA.z + bsFrontSign * 0.25, 0.5, 0.28, 0.06, [78, 168, 214]);
-      this.addBox(room, cornerA.x - 0.18, 1.44, cornerA.z + bsFrontSign * 0.25, 0.54, 0.26, 0.06, [92, 188, 122]);
-      this.addCollider(cornerA.x, cornerA.z, 0.65, 0.32);
+      this.addBox(room, cornerB.x, 1.24, cornerB.z + frontSignB * 0.39, 0.82, 0.04, 0.04, [170, 182, 194]);
+      this.addBox(room, cornerB.x - 0.28, 1.48, cornerB.z + frontSignB * 0.4, 0.05, 0.28, 0.06, [185, 196, 208]);
+      this.addBox(room, cornerB.x - 0.28, 0.82, cornerB.z + frontSignB * 0.4, 0.05, 0.44, 0.06, [185, 196, 208]);
+      this.addCollider(cornerB.x, cornerB.z, 0.45, 0.45, room.floor);
 
-      // Corner B: Reading Desk / Activity Table + Interactive Desk Lamp!
-      this.addBox(room, cornerB.x, 0.38, cornerB.z, 1.15, 0.76, 0.68, [178, 126, 78]);
+      // 3. Center of the Kitchen: Kitchen Island with Overhang Butcher-Block Countertop & 2 Barstools!
+      const ix = room.cx;
+      const iz = room.cz;
+      // Island shaker cabinet base
+      this.addBox(room, ix, 0.43, iz, 1.46, 0.86, 0.78, [76, 112, 134]);
+      // Cream marble / butcher-block overhang countertop sitting cleanly on top (y = 0.86 to 0.94)
+      this.addBox(room, ix, 0.9, iz, 1.64, 0.08, 0.94, [248, 245, 238]);
+      // Wooden cutting board & fruit accent on top of the island
+      this.addBox(room, ix - 0.32, 0.96, iz + 0.06, 0.42, 0.04, 0.3, [196, 140, 86]);
+      this.addBox(room, ix + 0.28, 0.98, iz - 0.04, 0.26, 0.08, 0.26, [224, 92, 74]);
+      // Two Breakfast Barstools tucked cleanly along one side of the island
+      for (const stoolOffset of [-0.42, 0.42]) {
+        const sx = ix + stoolOffset;
+        const sz = iz - 0.56;
+        this.addBox(room, sx, 0.28, sz, 0.14, 0.56, 0.14, [122, 82, 52]);
+        this.addBox(room, sx, 0.595, sz, 0.34, 0.07, 0.34, [218, 128, 72]);
+      }
+      this.addCollider(ix, iz - 0.06, 0.84, 0.58, room.floor);
+    } else if (t === 'study') {
+      // Real-World Home Office Layout:
+      // 1. Corner A: Twin Tall Wooden Office Bookshelves lined with colorful book rows!
+      this.addBookshelf(room, cornerA.x, cornerA.z, frontSignA, 1.26, 1.78);
+      const secondBookcaseZ = cornerA.z + frontSignA * 1.22;
+      if (Math.abs(secondBookcaseZ - room.doorCenters.east) > 1.35 && Math.abs(secondBookcaseZ - room.doorCenters.west) > 1.35) {
+        this.addBookshelf(room, cornerA.x, secondBookcaseZ, frontSignA, 1.12, 1.78);
+      }
+
+      // 2. Corner B: Executive Home Office Desk with Drawer Pedestals, Desktop Computer Monitor, Office Chair & Desk Lamp!
+      // Left and right drawer pedestals supporting the desktop (y = 0 to 0.70)
+      this.addBox(room, cornerB.x - 0.46, 0.35, cornerB.z, 0.36, 0.7, 0.66, [138, 92, 56]);
+      this.addBox(room, cornerB.x + 0.46, 0.35, cornerB.z, 0.36, 0.7, 0.66, [138, 92, 56]);
+      // Wide walnut desktop sitting cleanly on top (y = 0.70 to 0.78)
+      this.addBox(room, cornerB.x, 0.74, cornerB.z, 1.36, 0.08, 0.72, [168, 116, 72]);
+      // Desktop Computer Monitor (stand + bezel + glowing screen) on one side of the desk
+      const monX = cornerB.x - 0.24;
+      const monZ = cornerB.z - frontSignB * 0.14;
+      this.addBox(room, monX, 0.83, monZ, 0.12, 0.1, 0.1, [48, 52, 62]);
+      this.addBox(room, monX, 1.02, monZ, 0.54, 0.34, 0.05, [38, 42, 52]);
+      this.addBox(room, monX, 1.02, monZ + frontSignB * 0.035, 0.48, 0.28, 0.02, [86, 168, 224], { emissive: true });
+      // Interactive Desk Lamp on the other side of the desk
+      this.addDeskLamp(room, cornerB.x + 0.36, 0.78, cornerB.z, 'Office Desk Lamp');
+      // Ergonomic Office Chair tucked in front of the desk
+      const chairZ = cornerB.z + frontSignB * 0.54;
+      this.addBox(room, cornerB.x, 0.21, chairZ, 0.14, 0.42, 0.14, [58, 62, 72]);
+      this.addBox(room, cornerB.x, 0.46, chairZ, 0.46, 0.08, 0.44, [68, 108, 148]);
+      this.addBox(room, cornerB.x, 0.71, chairZ + frontSignB * 0.18, 0.44, 0.42, 0.08, [58, 94, 132]);
+      this.addCollider(cornerB.x, cornerB.z + frontSignB * 0.12, 0.7, 0.52, room.floor);
+    } else if (t === 'playroom' || t === 'music' || t === 'loft' || t === 'sunroom') {
+      // Corner A: Tall Bookshelf / Cubby Storage with Colorful Books
+      this.addBookshelf(room, cornerA.x, cornerA.z, frontSignA, 1.24, 1.68);
+
+      // Corner B: Craft & Activity Desk + Interactive Desk Lamp!
+      this.addBox(room, cornerB.x, 0.38, cornerB.z, 1.18, 0.76, 0.68, [178, 126, 78]);
       this.addDeskLamp(room, cornerB.x, 0.76, cornerB.z, 'Desk Lamp');
-      this.addCollider(cornerB.x, cornerB.z, 0.6, 0.38);
+      this.addCollider(cornerB.x, cornerB.z, 0.62, 0.38, room.floor);
     } else {
       // Foyer / Hallway: Entryway Console Table + Table Lamp + Potted Houseplant
       this.addBox(room, cornerA.x, 0.4, cornerA.z, 1.18, 0.8, 0.54, [164, 112, 72]);
       this.addDeskLamp(room, cornerA.x, 0.8, cornerA.z, 'Entry Table Lamp');
-      this.addCollider(cornerA.x, cornerA.z, 0.62, 0.32);
+      this.addCollider(cornerA.x, cornerA.z, 0.62, 0.32, room.floor);
 
       this.addPottedPlant(room, cornerB.x, cornerB.z);
     }
   }
 
-  addCollider(x, z, halfW, halfD) {
+  addCollider(x, z, halfW, halfD, floor = 0) {
     this.colliders.push({
+      floor,
       minX: x - halfW,
       maxX: x + halfW,
       minZ: z - halfD,
@@ -648,10 +1251,14 @@ export class ProceduralHouse {
   generateChecklist() {
     const tasks = [];
     const nonFoyerRooms = this.rooms.filter((r) => r.theme.type !== 'foyer');
-    const targetRooms = this.rng.shuffle(nonFoyerRooms.length ? nonFoyerRooms : this.rooms);
+    const upstairsRooms = nonFoyerRooms.filter((r) => r.floor === 1);
+    const shuffledNonFoyer = this.rng.shuffle(nonFoyerRooms.length ? nonFoyerRooms : this.rooms);
 
-    // Goal 1: A specific room's Ceiling Fan or Standing Fan speed task
-    const r1 = targetRooms[0];
+    // If this house has a 2nd floor, make sure Goal 1 features an Upstairs room so kids get to go up the stairs!
+    const r1 = (this.hasSecondFloor && upstairsRooms.length > 0)
+      ? this.rng.pick(upstairsRooms)
+      : shuffledNonFoyer[0];
+    const targetRooms = [r1, ...shuffledNonFoyer.filter((r) => r !== r1)];
     const wantHigh = this.rng.next() < 0.6;
     if (wantHigh) {
       // Ensure it doesn't already start at HIGH so the player gets to do it
@@ -779,10 +1386,20 @@ export class ProceduralHouse {
     };
   }
 
-  getRoomAt(x, z) {
+  getRoomAt(x, z, floor = 0) {
+    // First check exact AABB bounds for variable-sized luxury rooms on the current floor
+    for (const r of this.rooms) {
+      if (r.floor === floor && x >= r.minX && x <= r.maxX && z >= r.minZ && z <= r.maxZ) {
+        return r;
+      }
+    }
     const gx = Math.round(x / this.roomSize);
     const gz = Math.round(z / this.roomSize);
-    return this.roomMap.get(this.gridKey(gx, gz)) || this.rooms[0];
+    return (
+      this.roomMap.get(this.gridKey(gx, gz, floor)) ||
+      this.rooms.find((r) => r.floor === floor) ||
+      this.rooms[0]
+    );
   }
 
   // Update fan blade momentum, oscillation, pull-chain bounce, and floating breeze particles
@@ -807,6 +1424,7 @@ export class ProceduralHouse {
     // Animate breeze motes in each room based on how fast that room's fans are spinning!
     for (const p of this.breezeParticles) {
       const room = p.room;
+      const by = room.baseY;
       const cSpeed = room.ceilingFan ? room.ceilingFan.currentAngularVel : 0;
       const pSpeed = room.portableFan ? room.portableFan.currentAngularVel : 0;
       const totalWind = cSpeed + pSpeed;
@@ -832,39 +1450,51 @@ export class ProceduralHouse {
       // Keep inside room bounds
       p.x = Math.max(room.minX + 0.4, Math.min(room.maxX - 0.4, p.x));
       p.z = Math.max(room.minZ + 0.4, Math.min(room.maxZ - 0.4, p.z));
-      if (p.y > this.wallHeight - 0.4) p.y = 0.4;
-      if (p.y < 0.35) p.y = this.wallHeight - 0.45;
+      if (p.y > by + this.wallHeight - 0.4) p.y = by + 0.4;
+      if (p.y < by + 0.35) p.y = by + this.wallHeight - 0.45;
     }
   }
 
-  // Test player movement against walls, doorways, and furniture colliders
-  canMoveTo(nx, nz, radius = 0.38) {
-    const gx = Math.round(nx / this.roomSize);
-    const gz = Math.round(nz / this.roomSize);
-    const room = this.roomMap.get(this.gridKey(gx, gz));
+  // Test player movement against walls, doorways, and furniture colliders on the current floor
+  canMoveTo(nx, nz, radius = 0.38, floor = 0) {
+    // Find which room on `floor` contains (nx, nz) — supports variable-sized 1.5x & 2x luxury rooms!
+    let room = null;
+    for (const r of this.rooms) {
+      if (r.floor === floor && nx >= r.minX && nx <= r.maxX && nz >= r.minZ && nz <= r.maxZ) {
+        room = r;
+        break;
+      }
+    }
+    if (!room) {
+      const gx = Math.round(nx / this.roomSize);
+      const gz = Math.round(nz / this.roomSize);
+      room = this.roomMap.get(this.gridKey(gx, gz, floor));
+    }
     if (!room) return false;
 
-    const halfDoor = this.doorWidth * 0.5 - radius * 0.55;
+    const halfDoor = this.doorWidth * 0.5 - radius * 0.72;
+    const dc = room.doorCenters || { north: room.cx, south: room.cx, east: room.cz, west: room.cz };
 
     // Check North wall (+Z)
     if (nz + radius > room.maxZ) {
-      if (!room.doors.north || Math.abs(nx - room.cx) > halfDoor) return false;
+      if (!room.doors.north || Math.abs(nx - dc.north) > halfDoor) return false;
     }
     // Check South wall (-Z)
     if (nz - radius < room.minZ) {
-      if (!room.doors.south || Math.abs(nx - room.cx) > halfDoor) return false;
+      if (!room.doors.south || Math.abs(nx - dc.south) > halfDoor) return false;
     }
     // Check East wall (+X)
     if (nx + radius > room.maxX) {
-      if (!room.doors.east || Math.abs(nz - room.cz) > halfDoor) return false;
+      if (!room.doors.east || Math.abs(nz - dc.east) > halfDoor) return false;
     }
     // Check West wall (-X)
     if (nx - radius < room.minX) {
-      if (!room.doors.west || Math.abs(nz - room.cz) > halfDoor) return false;
+      if (!room.doors.west || Math.abs(nz - dc.west) > halfDoor) return false;
     }
 
-    // Check furniture AABBs
+    // Check furniture AABBs on the same floor
     for (const c of this.colliders) {
+      if (c.floor !== floor) continue;
       if (
         nx + radius > c.minX &&
         nx - radius < c.maxX &&
@@ -878,12 +1508,15 @@ export class ProceduralHouse {
     return true;
   }
 
-  // Find the best interactive target in front of the player (or hovered by mouse)
+  // Find the best interactive target in front of the player (or hovered by mouse) on the active floor
   findNearestInteractive(cam, hoveredId = null) {
+    const currentFloor = cam.floor || 0;
     if (hoveredId && this.interactiveById.has(hoveredId)) {
       const item = this.interactiveById.get(hoveredId);
-      const dist = Math.hypot(item.x - cam.x, item.z - cam.z);
-      if (dist <= 4.8) return item;
+      if (item.room.floor === currentFloor) {
+        const dist = Math.hypot(item.x - cam.x, item.z - cam.z);
+        if (dist <= 4.8) return item;
+      }
     }
 
     const lookX = Math.sin(cam.yaw) * Math.cos(cam.pitch);
@@ -894,6 +1527,7 @@ export class ProceduralHouse {
     let bestScore = Infinity;
 
     for (const item of this.interactives) {
+      if (item.room.floor !== currentFloor) continue;
       const dx = item.x - cam.x;
       const dy = (item.interactY ?? item.y) - cam.y;
       const dz = item.z - cam.z;
@@ -915,13 +1549,24 @@ export class ProceduralHouse {
   }
 
   // Emit all 3D polygons & sprites for the Cozy3DRenderer
+  // Both 1st floor and 2nd floor rooms render simultaneously in true 3D depth order,
+  // so looking up the stairwell from the 1st floor shows the 2nd floor ceiling/fan/rails,
+  // and looking down the stairwell from the 2nd floor shows the 1st floor hallway below
+  // while the 2nd-floor floorboards naturally occlude the stairs underneath them!
   collectRenderPrimitives(pushPoly, pushSprite, hoverTarget, camera, setCurrentRoom = () => {}) {
     const hoverId = hoverTarget ? hoverTarget.id : null;
+    const activeFloor = camera.floor || 0;
 
     for (const room of this.rooms) {
-      // Quick distance check from camera to room center
-      const distRoom = Math.hypot(room.cx - camera.x, room.cz - camera.z);
-      if (distRoom > 16.5) continue;
+      const dxAABB = Math.max(0, room.minX - camera.x, camera.x - room.maxX);
+      const dyAABB = Math.max(
+        0,
+        room.baseY - camera.y,
+        camera.y - (room.baseY + this.wallHeight)
+      );
+      const dzAABB = Math.max(0, room.minZ - camera.z, camera.z - room.maxZ);
+      const distRoom = Math.hypot(dxAABB, dyAABB, dzAABB);
+      if (distRoom > 18.5) continue;
 
       setCurrentRoom(room);
       this.emitRoomGeometry(room, pushPoly);
@@ -940,8 +1585,8 @@ export class ProceduralHouse {
 
     // Emit interactive fixtures (Ceiling Fans, Portable Fans, Lamps, Switches, Exit Door)
     for (const item of this.interactives) {
-      const dist = Math.hypot(item.x - camera.x, item.z - camera.z);
-      if (dist > 15.5) continue;
+      const dist = Math.hypot(item.x - camera.x, item.y - camera.y, item.z - camera.z);
+      if (dist > 17.5) continue;
       const isHovered = item.id === hoverId;
       setCurrentRoom(item.room);
 
@@ -964,20 +1609,22 @@ export class ProceduralHouse {
       }
     }
 
-    // Emit swirling airflow breeze particles
+    // Emit subtle warm golden dust motes ONLY when a room's fan is actively spinning
     for (const p of this.breezeParticles) {
-      const dist = Math.hypot(p.x - camera.x, p.z - camera.z);
-      if (dist > 11) continue;
-      setCurrentRoom(p.room);
+      if (p.room.floor !== activeFloor) continue;
       const cVel = p.room.ceilingFan ? p.room.ceilingFan.currentAngularVel : 0;
       const pVel = p.room.portableFan ? p.room.portableFan.currentAngularVel : 0;
-      const activeWind = cVel + pVel > 0.5;
+      if (cVel + pVel < 1.5) continue;
+
+      const dist = Math.hypot(p.x - camera.x, p.z - camera.z);
+      if (dist > 7.5) continue;
+      setCurrentRoom(p.room);
 
       pushSprite(
         p.x, p.y, p.z,
-        activeWind ? p.size * 1.25 : p.size * 0.8,
-        activeWind ? 'rgba(130, 235, 255, 0.72)' : 'rgba(255, 245, 210, 0.35)',
-        { alpha: activeWind ? 0.75 : 0.35 }
+        p.size * 0.45,
+        'rgba(255, 244, 200, 0.35)',
+        { alpha: 0.35 }
       );
     }
   }
@@ -996,11 +1643,15 @@ export class ProceduralHouse {
     ];
   }
 
-  // High-Resolution Woven Rectangular Area Rug: Concentric Woven Borders + Fine Warp/Weft Pile Stripes + Fringe Tassels!
+  // High-Resolution Woven Rectangular Area Rug: Scales with luxury room size!
   emitHighResRug(room, pushPoly) {
-    const { cx, cz, theme } = room;
-    const rugW = 1.68; // Half-width (X)
-    const rugD = 1.42; // Half-depth (Z) — classic rectangular room rug proportions!
+    const { cz, theme, baseY } = room;
+    const hasStairwell = room.hasStairsUp || room.hasStairsDown;
+    const cx = hasStairwell ? room.cx + 0.55 : room.cx;
+    const scaleW = (room.sizeX || this.roomSize) / this.roomSize;
+    const scaleD = (room.sizeZ || this.roomSize) / this.roomSize;
+    const rugW = (hasStairwell ? 1.15 : 1.68) * Math.min(1.65, scaleW);
+    const rugD = 1.42 * Math.min(1.65, scaleD);
 
     const cream = theme.trimColor;
     const primary = theme.rugColor;
@@ -1020,10 +1671,10 @@ export class ProceduralHouse {
       // West (-X) fringe tufts
       pushPoly(
         [
-          { x: cx - rugW - fringeLen, y: 0.012, z: tz0 },
-          { x: cx - rugW - fringeLen, y: 0.012, z: tz1 },
-          { x: cx - rugW, y: 0.012, z: tz1 },
-          { x: cx - rugW, y: 0.012, z: tz0 },
+          { x: cx - rugW - fringeLen, y: baseY + 0.012, z: tz0 },
+          { x: cx - rugW - fringeLen, y: baseY + 0.012, z: tz1 },
+          { x: cx - rugW, y: baseY + 0.012, z: tz1 },
+          { x: cx - rugW, y: baseY + 0.012, z: tz0 },
         ],
         cream,
         { x: 0, y: 1, z: 0 },
@@ -1032,10 +1683,10 @@ export class ProceduralHouse {
       // East (+X) fringe tufts
       pushPoly(
         [
-          { x: cx + rugW, y: 0.012, z: tz0 },
-          { x: cx + rugW, y: 0.012, z: tz1 },
-          { x: cx + rugW + fringeLen, y: 0.012, z: tz1 },
-          { x: cx + rugW + fringeLen, y: 0.012, z: tz0 },
+          { x: cx + rugW, y: baseY + 0.012, z: tz0 },
+          { x: cx + rugW, y: baseY + 0.012, z: tz1 },
+          { x: cx + rugW + fringeLen, y: baseY + 0.012, z: tz1 },
+          { x: cx + rugW + fringeLen, y: baseY + 0.012, z: tz0 },
         ],
         cream,
         { x: 0, y: 1, z: 0 },
@@ -1047,10 +1698,10 @@ export class ProceduralHouse {
     const drawRugRect = (hw, hd, color, strokeStyle = null, lineWidth = 0) => {
       pushPoly(
         [
-          { x: cx - hw, y: 0.015, z: cz - hd },
-          { x: cx - hw, y: 0.015, z: cz + hd },
-          { x: cx + hw, y: 0.015, z: cz + hd },
-          { x: cx + hw, y: 0.015, z: cz - hd },
+          { x: cx - hw, y: baseY + 0.015, z: cz - hd },
+          { x: cx - hw, y: baseY + 0.015, z: cz + hd },
+          { x: cx + hw, y: baseY + 0.015, z: cz + hd },
+          { x: cx + hw, y: baseY + 0.015, z: cz - hd },
         ],
         color,
         { x: 0, y: 1, z: 0 },
@@ -1080,10 +1731,10 @@ export class ProceduralHouse {
 
       pushPoly(
         [
-          { x: sx0, y: 0.017, z: cz - fieldD },
-          { x: sx0, y: 0.017, z: cz + fieldD },
-          { x: sx1, y: 0.017, z: cz + fieldD },
-          { x: sx1, y: 0.017, z: cz - fieldD },
+          { x: sx0, y: baseY + 0.017, z: cz - fieldD },
+          { x: sx0, y: baseY + 0.017, z: cz + fieldD },
+          { x: sx1, y: baseY + 0.017, z: cz + fieldD },
+          { x: sx1, y: baseY + 0.017, z: cz - fieldD },
         ],
         stripColor,
         { x: 0, y: 1, z: 0 },
@@ -1103,10 +1754,10 @@ export class ProceduralHouse {
     // Smooth geometric diamond lozenge at the center of the rug
     pushPoly(
       [
-        { x: cx, y: 0.019, z: cz - 0.2 },
-        { x: cx - 0.28, y: 0.019, z: cz },
-        { x: cx, y: 0.019, z: cz + 0.2 },
-        { x: cx + 0.28, y: 0.019, z: cz },
+        { x: cx, y: baseY + 0.019, z: cz - 0.2 },
+        { x: cx - 0.28, y: baseY + 0.019, z: cz },
+        { x: cx, y: baseY + 0.019, z: cz + 0.2 },
+        { x: cx + 0.28, y: baseY + 0.019, z: cz },
       ],
       goldAccent,
       { x: 0, y: 1, z: 0 },
@@ -1115,20 +1766,25 @@ export class ProceduralHouse {
   }
 
   emitRoomGeometry(room, pushPoly) {
-    const { minX, maxX, minZ, maxZ, cx, cz, theme } = room;
+    const { minX, maxX, minZ, maxZ, cx, cz, theme, baseY } = room;
+    const roomW = maxX - minX;
+    const roomD = maxZ - minZ;
     const H = this.wallHeight;
+    const dc = room.doorCenters || { north: cx, south: cx, east: cz, west: cz };
 
     // 1. High-Resolution Textured Floor: Mosaic Ceramic Tile (Kitchen) or Fine-Strip Hardwood Planks with Multi-Ribbon Wood Grain!
     if (theme.type === 'kitchen') {
-      const tileSteps = 14; // High-res 0.42m ceramic tiles
-      const step = this.roomSize / tileSteps;
+      const tileStepsX = Math.max(14, Math.round(roomW / 0.5));
+      const tileStepsZ = Math.max(14, Math.round(roomD / 0.5));
+      const stepX = roomW / tileStepsX;
+      const stepZ = roomD / tileStepsZ;
       const groutColor = 'rgba(124, 118, 108, 0.48)';
-      for (let ix = 0; ix < tileSteps; ix++) {
-        for (let iz = 0; iz < tileSteps; iz++) {
-          const x0 = minX + ix * step;
-          const x1 = x0 + step;
-          const z0 = minZ + iz * step;
-          const z1 = z0 + step;
+      for (let ix = 0; ix < tileStepsX; ix++) {
+        for (let iz = 0; iz < tileStepsZ; iz++) {
+          const x0 = minX + ix * stepX;
+          const x1 = x0 + stepX;
+          const z0 = minZ + iz * stepZ;
+          const z1 = z0 + stepZ;
           const isAlt = (ix + iz) % 2 === 0;
           const jitter = this.hash2D(ix * 11, iz * 19) * 5;
           const tileColor = isAlt
@@ -1137,10 +1793,10 @@ export class ProceduralHouse {
 
           pushPoly(
             [
-              { x: x0, y: 0, z: z0 },
-              { x: x0, y: 0, z: z1 },
-              { x: x1, y: 0, z: z1 },
-              { x: x1, y: 0, z: z0 },
+              { x: x0, y: baseY, z: z0 },
+              { x: x0, y: baseY, z: z1 },
+              { x: x1, y: baseY, z: z1 },
+              { x: x1, y: baseY, z: z0 },
             ],
             tileColor,
             { x: 0, y: 1, z: 0 },
@@ -1149,31 +1805,60 @@ export class ProceduralHouse {
         }
       }
     } else {
-      // High-Resolution Narrow Hardwood Floorboards (24 strips = 0.25m planks) with Wavy Multi-Fiber Wood Grain & Knots!
-      const numStrips = 24;
-      const stripW = this.roomSize / numStrips;
+      // High-Resolution Narrow Hardwood Floorboards (~0.30m planks across variable-width rooms!)
+      const numStrips = Math.max(24, Math.round(roomW / 0.3));
+      const stripW = roomW / numStrips;
       const plankSeamColor = 'rgba(54, 32, 16, 0.5)';
 
       for (let s = 0; s < numStrips; s++) {
         const x0 = minX + s * stripW;
         const x1 = x0 + stripW;
 
-        // 4 staggered plank joint patterns across neighboring strips
+        // If this is the 2nd Floor Upstairs Landing (hasStairsDown), check if this strip overlaps the stairwell X range!
+        const isStairOpeningStrip =
+          room.hasStairsDown &&
+          this.stairwell &&
+          x1 > this.stairwell.minX + 0.02 &&
+          x0 < this.stairwell.maxX - 0.02;
+
+        // 4 staggered plank joint patterns scaled proportionally across roomD
         const staggerType = s % 4;
-        let joints;
+        let fracs;
         if (staggerType === 0) {
-          joints = [minZ, minZ + 1.5, minZ + 3.1, minZ + 4.6, maxZ];
+          fracs = [0, 0.25, 0.52, 0.77, 1.0];
         } else if (staggerType === 1) {
-          joints = [minZ, minZ + 0.9, minZ + 2.4, minZ + 3.9, minZ + 5.2, maxZ];
+          fracs = [0, 0.15, 0.4, 0.65, 0.87, 1.0];
         } else if (staggerType === 2) {
-          joints = [minZ, minZ + 1.8, minZ + 3.5, minZ + 4.9, maxZ];
+          fracs = [0, 0.3, 0.58, 0.82, 1.0];
         } else {
-          joints = [minZ, minZ + 1.2, minZ + 2.7, minZ + 4.2, maxZ];
+          fracs = [0, 0.2, 0.45, 0.7, 1.0];
+        }
+        let joints = fracs.map((f) => minZ + f * roomD);
+
+        // CRITICAL FIX: For strips overlapping the stairwell opening, insert EXACT joints at zBottom and zTop
+        // so the floorboards on the top landing (z >= zTop) and south gallery (z <= zBottom) are 100% solid right up to the top step!
+        if (isStairOpeningStrip) {
+          const zb = this.stairwell.zBottom;
+          const zt = this.stairwell.zTop;
+          const filtered = joints.filter((z) => z <= zb - 0.15 || z >= zt + 0.15);
+          filtered.push(zb, zt);
+          filtered.sort((a, b) => a - b);
+          joints = filtered;
         }
 
         for (let p = 0; p < joints.length - 1; p++) {
           const z0 = joints[p];
           const z1 = joints[p + 1];
+          const midZ = (z0 + z1) * 0.5;
+
+          // Only skip the plank segment that is strictly INSIDE the stairwell opening [zBottom, zTop]!
+          if (
+            isStairOpeningStrip &&
+            midZ > this.stairwell.zBottom + 0.02 &&
+            midZ < this.stairwell.zTop - 0.02
+          ) {
+            continue;
+          }
           const hVal = this.hash2D(room.gx * 31 + s * 7, room.gz * 29 + p * 13);
           const variation = hVal * 21;
           const plankColor = this.tintColor(theme.floorColor, variation);
@@ -1181,10 +1866,10 @@ export class ProceduralHouse {
           // Base plank board (Layer 0)
           pushPoly(
             [
-              { x: x0, y: 0, z: z0 },
-              { x: x0, y: 0, z: z1 },
-              { x: x1, y: 0, z: z1 },
-              { x: x1, y: 0, z: z0 },
+              { x: x0, y: baseY, z: z0 },
+              { x: x0, y: baseY, z: z1 },
+              { x: x1, y: baseY, z: z1 },
+              { x: x1, y: baseY, z: z0 },
             ],
             plankColor,
             { x: 0, y: 1, z: 0 },
@@ -1203,10 +1888,10 @@ export class ProceduralHouse {
           const r1z1 = z1 - plankLen * 0.1;
           pushPoly(
             [
-              { x: r1x0, y: 0.002, z: r1z0 },
-              { x: r1x0 + stripW * 0.05, y: 0.002, z: r1z1 },
-              { x: r1x1 + stripW * 0.05, y: 0.002, z: r1z1 },
-              { x: r1x1, y: 0.002, z: r1z0 },
+              { x: r1x0, y: baseY + 0.002, z: r1z0 },
+              { x: r1x0 + stripW * 0.05, y: baseY + 0.002, z: r1z1 },
+              { x: r1x1 + stripW * 0.05, y: baseY + 0.002, z: r1z1 },
+              { x: r1x1, y: baseY + 0.002, z: r1z0 },
             ],
             darkFiberColor,
             { x: 0, y: 1, z: 0 },
@@ -1220,10 +1905,10 @@ export class ProceduralHouse {
           const r2z1 = z1 - plankLen * 0.16;
           pushPoly(
             [
-              { x: r2x0, y: 0.003, z: r2z0 },
-              { x: r2x0 - stripW * 0.04, y: 0.003, z: r2z1 },
-              { x: r2x1 - stripW * 0.04, y: 0.003, z: r2z1 },
-              { x: r2x1, y: 0.003, z: r2z0 },
+              { x: r2x0, y: baseY + 0.003, z: r2z0 },
+              { x: r2x0 - stripW * 0.04, y: baseY + 0.003, z: r2z1 },
+              { x: r2x1 - stripW * 0.04, y: baseY + 0.003, z: r2z1 },
+              { x: r2x1, y: baseY + 0.003, z: r2z0 },
             ],
             warmFiberColor,
             { x: 0, y: 1, z: 0 },
@@ -1238,10 +1923,10 @@ export class ProceduralHouse {
             const kd = 0.065;
             pushPoly(
               [
-                { x: kx - kw, y: 0.004, z: kz - kd },
-                { x: kx - kw, y: 0.004, z: kz + kd },
-                { x: kx + kw, y: 0.004, z: kz + kd },
-                { x: kx + kw, y: 0.004, z: kz - kd },
+                { x: kx - kw, y: baseY + 0.004, z: kz - kd },
+                { x: kx - kw, y: baseY + 0.004, z: kz + kd },
+                { x: kx + kw, y: baseY + 0.004, z: kz + kd },
+                { x: kx + kw, y: baseY + 0.004, z: kz - kd },
               ],
               this.tintColor(plankColor, -26),
               { x: 0, y: 1, z: 0 },
@@ -1252,27 +1937,46 @@ export class ProceduralHouse {
       }
     }
 
-    // High-Resolution Woven Patterned Area Rug (Layer 2)
-    this.emitHighResRug(room, pushPoly);
+    // High-Resolution Woven Patterned Area Rug (skip the rug in the Kitchen and in the Grand Staircase Hall!)
+    if (!room.hasStairsUp && !room.hasStairsDown && theme.type !== 'kitchen') {
+      this.emitHighResRug(room, pushPoly);
+    }
 
     // 2. Coffered Ceiling Panels with Recessed Acoustic/Plaster Tiles & Exposed Wooden Ceiling Beams!
     const ceilColor = [242, 239, 232];
-    const ceilSteps = 4; // 4x4 coffered ceiling grid (1.5m panels)
-    const cStep = this.roomSize / ceilSteps;
-    for (let ix = 0; ix < ceilSteps; ix++) {
-      for (let iz = 0; iz < ceilSteps; iz++) {
-        const x0 = minX + ix * cStep;
-        const x1 = x0 + cStep;
-        const z0 = minZ + iz * cStep;
-        const z1 = z0 + cStep;
+    const ceilStepsX = Math.max(6, Math.round(roomW / 1.2));
+    const ceilStepsZ = Math.max(6, Math.round(roomD / 1.2));
+    const cStepX = roomW / ceilStepsX;
+    const cStepZ = roomD / ceilStepsZ;
+    for (let ix = 0; ix < ceilStepsX; ix++) {
+      for (let iz = 0; iz < ceilStepsZ; iz++) {
+        const x0 = minX + ix * cStepX;
+        const x1 = x0 + cStepX;
+        const z0 = minZ + iz * cStepZ;
+        const z1 = z0 + cStepZ;
+
+        // Leave 1st-floor ceiling open strictly inside the center staircase stairwell [zBottom, zTop]!
+        const midX = (x0 + x1) * 0.5;
+        const midZ = (z0 + z1) * 0.5;
+        if (
+          room.hasStairsUp &&
+          this.stairwell &&
+          midX > this.stairwell.minX - 0.1 &&
+          midX < this.stairwell.maxX + 0.1 &&
+          midZ > this.stairwell.zBottom - 0.1 &&
+          midZ < this.stairwell.zTop + 0.1
+        ) {
+          continue;
+        }
+
         const tone = ((ix + iz) % 2 === 0) ? 3 : -3;
 
         pushPoly(
           [
-            { x: x0, y: H, z: z0 },
-            { x: x1, y: H, z: z0 },
-            { x: x1, y: H, z: z1 },
-            { x: x0, y: H, z: z1 },
+            { x: x0, y: baseY + H, z: z0 },
+            { x: x1, y: baseY + H, z: z0 },
+            { x: x1, y: baseY + H, z: z1 },
+            { x: x0, y: baseY + H, z: z1 },
           ],
           this.tintColor(ceilColor, tone),
           { x: 0, y: -1, z: 0 },
@@ -1281,10 +1985,13 @@ export class ProceduralHouse {
       }
     }
 
-    // Exposed Wooden Ceiling Rafter Beams running across the ceiling (Layer 2)
-    const beamColor = [132, 94, 64];
-    for (const bz of [minZ + 1.5, maxZ - 1.5]) {
-      this.emitBox(pushPoly, cx, H - 0.06, bz, this.roomSize - 0.08, 0.12, 0.16, beamColor, { layer: 2 });
+    // Exposed Wooden Ceiling Rafter Beams running across the ceiling (skip in the 1st-floor Staircase Hall so beams never cross the open stairwell!)
+    if (!room.hasStairsUp) {
+      const beamColor = [132, 94, 64];
+      const beamW = roomW - 0.08;
+      for (const bz of [minZ + roomD * 0.25, maxZ - roomD * 0.25]) {
+        this.emitBox(pushPoly, cx, baseY + H - 0.06, bz, beamW, 0.12, 0.16, beamColor, { layer: 2 });
+      }
     }
 
     // 3. Textured Walls with Wainscoting Lower Wood Panels, Chair Rail Molding, Striped Wallpaper & Crown Molding!
@@ -1298,12 +2005,12 @@ export class ProceduralHouse {
       theme.wallColor,
       { x: 0, y: 0, z: -1 },
       (u0, u1, v0, v1) => [
-        { x: u0, y: v0, z: maxZ },
-        { x: u0, y: v1, z: maxZ },
-        { x: u1, y: v1, z: maxZ },
-        { x: u1, y: v0, z: maxZ },
+        { x: u0, y: baseY + v0, z: maxZ },
+        { x: u0, y: baseY + v1, z: maxZ },
+        { x: u1, y: baseY + v1, z: maxZ },
+        { x: u1, y: baseY + v0, z: maxZ },
       ],
-      minX, maxX, cx, hd, dh, H
+      minX, maxX, dc.north, hd, dh, H
     );
 
     // SOUTH WALL (-Z, normal 0, 0, 1)
@@ -1313,12 +2020,12 @@ export class ProceduralHouse {
       theme.wallColor,
       { x: 0, y: 0, z: 1 },
       (u0, u1, v0, v1) => [
-        { x: u1, y: v0, z: minZ },
-        { x: u1, y: v1, z: minZ },
-        { x: u0, y: v1, z: minZ },
-        { x: u0, y: v0, z: minZ },
+        { x: u1, y: baseY + v0, z: minZ },
+        { x: u1, y: baseY + v1, z: minZ },
+        { x: u0, y: baseY + v1, z: minZ },
+        { x: u0, y: baseY + v0, z: minZ },
       ],
-      minX, maxX, cx, hd, dh, H
+      minX, maxX, dc.south, hd, dh, H
     );
 
     // EAST WALL (+X, normal -1, 0, 0)
@@ -1328,12 +2035,12 @@ export class ProceduralHouse {
       theme.wallColor,
       { x: -1, y: 0, z: 0 },
       (u0, u1, v0, v1) => [
-        { x: maxX, y: v0, z: u1 },
-        { x: maxX, y: v1, z: u1 },
-        { x: maxX, y: v1, z: u0 },
-        { x: maxX, y: v0, z: u0 },
+        { x: maxX, y: baseY + v0, z: u1 },
+        { x: maxX, y: baseY + v1, z: u1 },
+        { x: maxX, y: baseY + v1, z: u0 },
+        { x: maxX, y: baseY + v0, z: u0 },
       ],
-      minZ, maxZ, cz, hd, dh, H
+      minZ, maxZ, dc.east, hd, dh, H
     );
 
     // WEST WALL (-X, normal 1, 0, 0)
@@ -1343,12 +2050,12 @@ export class ProceduralHouse {
       theme.wallColor,
       { x: 1, y: 0, z: 0 },
       (u0, u1, v0, v1) => [
-        { x: minX, y: v0, z: u0 },
-        { x: minX, y: v1, z: u0 },
-        { x: minX, y: v1, z: u1 },
-        { x: minX, y: v0, z: u1 },
+        { x: minX, y: baseY + v0, z: u0 },
+        { x: minX, y: baseY + v1, z: u0 },
+        { x: minX, y: baseY + v1, z: u1 },
+        { x: minX, y: baseY + v0, z: u1 },
       ],
-      minZ, maxZ, cz, hd, dh, H
+      minZ, maxZ, dc.west, hd, dh, H
     );
   }
 
@@ -1444,6 +2151,11 @@ export class ProceduralHouse {
       [{ x: x0, y: y1, z: z0 }, { x: x0, y: y1, z: z1 }, { x: x1, y: y1, z: z1 }, { x: x1, y: y1, z: z0 }],
       color, { x: 0, y: 1, z: 0 }, options
     );
+    // Bottom (-Y) so elevated boxes (ceiling beams, fan motor housings, window frames, monitors) are solid from underneath!
+    pushPoly(
+      [{ x: x0, y: y0, z: z1 }, { x: x0, y: y0, z: z0 }, { x: x1, y: y0, z: z0 }, { x: x1, y: y0, z: z1 }],
+      color, { x: 0, y: -1, z: 0 }, options
+    );
     // North (+Z)
     pushPoly(
       [{ x: x0, y: y0, z: z1 }, { x: x1, y: y0, z: z1 }, { x: x1, y: y1, z: z1 }, { x: x0, y: y1, z: z1 }],
@@ -1467,12 +2179,13 @@ export class ProceduralHouse {
   }
 
   emitCeilingFan(pushPoly, pushSprite, fan, isHovered) {
-    const { x, y, z, bladeAngle, speed } = fan;
+    const { x, y, z, bladeAngle, speed, room } = fan;
+    const by = room.baseY;
     const boxOpts = { interactiveId: fan.id, highlight: isHovered };
     const bladeOpts = { interactiveId: fan.id, highlight: isHovered, doubleSided: true };
 
     // Downrod & Motor Housing (single-sided 3D boxes with non-overlapping Y ranges!)
-    this.emitBox(pushPoly, x, this.wallHeight - 0.14, z, 0.1, 0.28, 0.1, [85, 72, 62], boxOpts);
+    this.emitBox(pushPoly, x, by + this.wallHeight - 0.14, z, 0.1, 0.28, 0.1, [85, 72, 62], boxOpts);
     this.emitBox(pushPoly, x, y, z, 0.36, 0.14, 0.36, [112, 84, 62], boxOpts);
 
     // 4 Rotating Wooden Fan Blades with Dual-Tone Wood Grain Inlay!
@@ -1583,14 +2296,15 @@ export class ProceduralHouse {
   }
 
   emitStandingFan(pushPoly, pushSprite, fan, isHovered) {
-    const { x, z, speed, bladeAngle } = fan;
+    const { x, z, speed, bladeAngle, room } = fan;
+    const by = room.baseY;
     // Box faces must stay single-sided so back faces don't fight with front faces!
     const boxOpts = { interactiveId: fan.id, highlight: isHovered };
     const bladeOpts = { interactiveId: fan.id, highlight: isHovered, doubleSided: true };
 
     // Base & vertical pole (separated cleanly without overlapping Y ranges)
-    this.emitBox(pushPoly, x, 0.06, z, 0.46, 0.12, 0.46, [68, 78, 96], boxOpts);
-    this.emitBox(pushPoly, x, 0.58, z, 0.1, 0.92, 0.1, [195, 205, 220], boxOpts);
+    this.emitBox(pushPoly, x, by + 0.06, z, 0.46, 0.12, 0.46, [68, 78, 96], boxOpts);
+    this.emitBox(pushPoly, x, by + 0.58, z, 0.1, 0.92, 0.1, [195, 205, 220], boxOpts);
 
     // Oscillating Head
     const headYaw = fan.baseYaw + Math.sin(fan.oscillatePhase) * 0.55;
@@ -1598,7 +2312,7 @@ export class ProceduralHouse {
     const dirZ = Math.sin(headYaw);
     const perpX = -dirZ;
     const perpZ = dirX;
-    const hy = 1.17;
+    const hy = by + 1.17;
 
     // Fan Motor Hub (sitting cleanly above the pole top at y = 1.04..1.30)
     this.emitBox(pushPoly, x, hy, z, 0.24, 0.24, 0.24, [82, 132, 188], boxOpts);
@@ -1642,17 +2356,21 @@ export class ProceduralHouse {
       );
     }
 
-    pushSprite(x, hy + 0.38, z, 0.07, speed > 0 ? '#38d9ff' : '#8892a8', {
-      interactiveId: fan.id,
-      label: (isHovered || speed > 0) ? `🌬️ ${FAN_SPEED_LABELS[speed]}` : null,
-    });
+    // Remove floating blue circles above standing fans! Only show a text label if hovered.
+    if (isHovered) {
+      pushSprite(x, hy + 0.34, z, 0.01, 'rgba(0,0,0,0)', {
+        interactiveId: fan.id,
+        label: `🌬️ ${FAN_SPEED_LABELS[speed]}`,
+      });
+    }
   }
 
   emitBoxFan(pushPoly, pushSprite, fan, isHovered) {
-    const { x, z, speed, bladeAngle } = fan;
+    const { x, z, speed, bladeAngle, room } = fan;
+    const by = room.baseY;
     const boxOpts = { interactiveId: fan.id, highlight: isHovered };
     const bladeOpts = { interactiveId: fan.id, highlight: isHovered, doubleSided: true };
-    const hy = 0.42;
+    const hy = by + 0.42;
 
     // Chunky Retro Box Fan Frame
     this.emitBox(pushPoly, x, hy, z, 0.58, 0.64, 0.22, [235, 110, 85], boxOpts);
@@ -1687,33 +2405,59 @@ export class ProceduralHouse {
       );
     }
 
-    pushSprite(x, hy + 0.46, z, 0.065, speed > 0 ? '#38d9ff' : '#ffb72b', {
-      interactiveId: fan.id,
-      label: (isHovered || speed > 0) ? `🧊 ${FAN_SPEED_LABELS[speed]}` : null,
+    // Physical rotary speed switch knob on top of the Box Fan (instead of a floating blue circle!)
+    const knobColor = speed > 0 ? [56, 217, 255] : [245, 238, 220];
+    this.emitBox(pushPoly, x, hy + 0.34, z, 0.1, 0.05, 0.1, knobColor, {
+      ...boxOpts,
+      emissive: speed > 0,
     });
+    if (isHovered) {
+      pushSprite(x, hy + 0.42, z, 0.01, 'rgba(0,0,0,0)', {
+        interactiveId: fan.id,
+        label: `🧊 ${FAN_SPEED_LABELS[speed]}`,
+      });
+    }
   }
 
   emitFloorLamp(pushPoly, pushSprite, lamp, isHovered) {
-    const { x, z, isOn } = lamp;
+    const { x, z, isOn, room } = lamp;
+    const by = room.baseY;
     const opts = { interactiveId: lamp.id, highlight: isHovered };
 
     // Base & Brass Pole
-    this.emitBox(pushPoly, x, 0.04, z, 0.38, 0.08, 0.38, [96, 76, 56], opts);
-    this.emitBox(pushPoly, x, 0.72, z, 0.07, 1.32, 0.07, [204, 164, 88], opts);
+    this.emitBox(pushPoly, x, by + 0.04, z, 0.38, 0.08, 0.38, [96, 76, 56], opts);
+    this.emitBox(pushPoly, x, by + 0.72, z, 0.07, 1.32, 0.07, [204, 164, 88], opts);
 
     // Warm Lampshade
     const shadeColor = isOn ? [255, 226, 138] : [215, 206, 188];
-    this.emitBox(pushPoly, x, 1.44, z, 0.44, 0.38, 0.44, shadeColor, {
+    this.emitBox(pushPoly, x, by + 1.44, z, 0.44, 0.38, 0.44, shadeColor, {
       ...opts,
       emissive: isOn,
     });
 
     if (isOn) {
-      pushSprite(x, 1.44, z, 0.65, 'rgba(255, 205, 100, 0.5)', {
+      pushSprite(x, by + 1.44, z, 0.65, 'rgba(255, 205, 100, 0.5)', {
         glow: true,
         interactiveId: lamp.id,
       });
     }
+  }
+
+  emitStairMarker(pushPoly, pushSprite, stair, isHovered) {
+    const isUp = stair.direction === 'up';
+    pushSprite(
+      stair.x,
+      stair.y + 0.65,
+      stair.z,
+      0.095,
+      isUp ? '#38d9ff' : '#ffb72b',
+      {
+        interactiveId: stair.id,
+        label: isUp
+          ? '🪜 UPSTAIRS (2nd Floor) — Walk Here or Click!'
+          : '🪜 DOWNSTAIRS (1st Floor) — Walk Here or Click!',
+      }
+    );
   }
 
   emitDeskLamp(pushPoly, pushSprite, lamp, isHovered) {

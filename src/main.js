@@ -1,9 +1,9 @@
 // Main Game Loop, Controls (Keyboard + Mouse + Touch D-Pad + USB/Bluetooth Gamepad),
 // Interactive Fan/Light Toggling, Checklist Evaluation, and Floorplan Minimap!
 
-import { Cozy3DRenderer } from './renderer.js?v=4';
-import { ProceduralHouse, FAN_SPEED_LABELS } from './house.js?v=4';
-import { sound } from './audio.js?v=4';
+import { Cozy3DRenderer } from './renderer.js?v=12';
+import { ProceduralHouse, FAN_SPEED_LABELS } from './house.js?v=12';
+import { sound } from './audio.js?v=12';
 
 class HouseExplorerGame {
   constructor() {
@@ -45,6 +45,7 @@ class HouseExplorerGame {
     this.dragMovedDistance = 0;
     this.lastPointer = { x: 0, y: 0 };
     this.stepTimer = 0;
+    this.stairCooldown = 0;
     this.gamepadPrevButtons = [];
 
     this.bindEvents();
@@ -63,17 +64,31 @@ class HouseExplorerGame {
     this.levelNumber = levelNumber;
     this.house = new ProceduralHouse(levelNumber, Date.now() + levelNumber * 997);
 
-    // Spawn player in the Foyer (0, 0) looking North into the house
+    // Spawn player in the 1st-Floor Foyer (0, 0, floor 0) looking North into the house
+    this.renderer.camera.floor = 0;
     this.renderer.camera.x = 0;
     this.renderer.camera.y = 1.55;
     this.renderer.camera.z = -1.25;
     this.renderer.camera.yaw = 0;
     this.renderer.camera.pitch = 0.04;
+    this.stairCooldown = 0;
 
     this.elHouseTitle.textContent = this.house.houseName;
     this.elExitBanner.hidden = true;
     this.buildChecklistDOM();
     this.evaluateChecklist(true);
+  }
+
+  takeStairs(targetFloor, destX = 0, destZ = -0.35) {
+    const cam = this.renderer.camera;
+    cam.floor = targetFloor;
+    cam.x = destX;
+    cam.z = destZ;
+    cam.y = targetFloor * this.house.wallHeight + 1.55;
+    this.stairCooldown = 1.1; // Prevent immediate re-trigger after arriving
+    sound.playStep();
+    setTimeout(() => sound.playStep(), 110);
+    setTimeout(() => sound.playSwitch(targetFloor === 1), 220);
   }
 
   buildChecklistDOM() {
@@ -156,6 +171,10 @@ class HouseExplorerGame {
       fan.speed = (fan.speed + 1) % 4;
       fan.chainSwing = 1.0;
       sound.playFanSpeed(fan.speed);
+    } else if (target.kind === 'stairs') {
+      this.takeStairs(target.targetFloor, target.destX, target.destZ);
+      this.updateInteractionPrompt();
+      return;
     } else if (target.kind === 'exit') {
       if (this.house.exitUnlocked) {
         this.showVictoryModal();
@@ -197,6 +216,11 @@ class HouseExplorerGame {
     }
     if (item.kind === 'switch_fan') {
       return `Ceiling Fan Speed: ${FAN_SPEED_LABELS[item.targetFan.speed]}`;
+    }
+    if (item.kind === 'stairs') {
+      return item.direction === 'up'
+        ? 'Walk onto steps or click / press SPACE to go UPSTAIRS (2nd Floor)!'
+        : 'Walk onto steps or click / press SPACE to go DOWNSTAIRS (1st Floor)!';
     }
     if (item.kind === 'exit') {
       return this.house.exitUnlocked
@@ -444,7 +468,8 @@ class HouseExplorerGame {
       cam.pitch = Math.max(-0.75, Math.min(0.85, cam.pitch + lookPitch * 1.6 * dt));
     }
 
-    // Apply walking with smooth wall sliding collision
+    // Apply walking with smooth wall sliding collision and physical stair climbing!
+    const currentFloor = cam.floor || 0;
     const walkSpeed = 3.25;
     const sinY = Math.sin(cam.yaw);
     const cosY = Math.cos(cam.yaw);
@@ -454,29 +479,41 @@ class HouseExplorerGame {
 
     let moved = false;
     if (Math.abs(vx) > 0.0001) {
-      if (this.house.canMoveTo(cam.x + vx, cam.z)) {
+      if (this.house.canMoveTo(cam.x + vx, cam.z, 0.38, currentFloor)) {
         cam.x += vx;
         moved = true;
       }
     }
     if (Math.abs(vz) > 0.0001) {
-      if (this.house.canMoveTo(cam.x, cam.z + vz)) {
+      if (this.house.canMoveTo(cam.x, cam.z + vz, 0.38, currentFloor)) {
         cam.z += vz;
         moved = true;
       }
     }
 
+    // Physical Stair Climbing: smoothly calculate elevation (0.0m to 3.0m) as you walk up or down the steps!
+    const floorElevation = this.house.getFloorElevation(cam.x, cam.z, cam.floor || 0);
+    // Automatically update active floor (0 vs 1) when crossing the halfway point of the stairs
+    if (this.house.isOnStaircase(cam.x, cam.z)) {
+      cam.floor = floorElevation >= this.house.wallHeight * 0.5 ? 1 : 0;
+    }
+    const baseEyeY = floorElevation + 1.55;
+
     // Gentle head-bob and footstep sound while walking
     if (moved) {
       this.stepTimer += dt;
-      cam.y = 1.55 + Math.sin(this.stepTimer * 11) * 0.032;
+      cam.y = baseEyeY + Math.sin(this.stepTimer * 11) * 0.032;
       if (this.stepTimer > 0.44) {
         this.stepTimer = 0;
         sound.playStep();
       }
 
-      // If all checklist goals are complete and the kid walks right up to the glowing Front Exit Door, celebrate!
-      if (this.house.exitUnlocked && this.house.exitDoor) {
+      // If all checklist goals are complete and the kid walks right up to the glowing Front Exit Door on Floor 0, celebrate!
+      if (
+        this.house.exitUnlocked &&
+        this.house.exitDoor &&
+        (cam.floor || 0) === 0
+      ) {
         const distToExit = Math.hypot(
           cam.x - this.house.exitDoor.x,
           cam.z - this.house.exitDoor.z
@@ -486,13 +523,15 @@ class HouseExplorerGame {
         }
       }
     } else {
-      cam.y += (1.55 - cam.y) * Math.min(1, dt * 8);
+      cam.y += (baseEyeY - cam.y) * Math.min(1, dt * 8);
     }
 
-    // Update current room indicator badge
-    const room = this.house.getRoomAt(cam.x, cam.z);
+    // Update current room indicator badge (with Floor badge if 2-story!)
+    const activeFloor = cam.floor || 0;
+    const room = this.house.getRoomAt(cam.x, cam.z, activeFloor);
     if (room) {
-      this.elCurrentRoom.textContent = `${room.icon} ${room.name}`;
+      const floorTag = this.house.hasSecondFloor ? ` (${activeFloor === 0 ? '1st Floor' : '2nd Floor'})` : '';
+      this.elCurrentRoom.textContent = `${room.icon} ${room.name}${floorTag}`;
     }
   }
 
@@ -502,7 +541,10 @@ class HouseExplorerGame {
     const H = this.minimapCanvas.height;
     ctx.clearRect(0, 0, W, H);
 
-    // Find bounding box of all rooms to center the floorplan
+    const activeFloor = this.renderer.camera.floor || 0;
+    const floorRooms = this.house.rooms.filter((r) => r.floor === activeFloor);
+
+    // Find bounding box of all rooms on the house so 1st & 2nd floor align on the same grid
     let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
     for (const r of this.house.rooms) {
       minX = Math.min(minX, r.minX);
@@ -522,21 +564,22 @@ class HouseExplorerGame {
       y: H * 0.5 - (wz - centerZ) * scale,
     });
 
-    // Draw rooms
-    for (const r of this.house.rooms) {
+    // Draw rooms on the active floor
+    for (const r of floorRooms) {
       const p0 = toMap(r.minX, r.maxZ);
       const rw = (r.maxX - r.minX) * scale;
       const rh = (r.maxZ - r.minZ) * scale;
 
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.11)';
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.45)';
+      ctx.fillStyle = activeFloor === 1 ? 'rgba(130, 190, 255, 0.14)' : 'rgba(255, 255, 255, 0.11)';
+      ctx.strokeStyle = activeFloor === 1 ? 'rgba(130, 215, 255, 0.6)' : 'rgba(255, 255, 255, 0.45)';
       ctx.lineWidth = 1.5;
       ctx.fillRect(p0.x + 1, p0.y + 1, rw - 2, rh - 2);
       ctx.strokeRect(p0.x + 1, p0.y + 1, rw - 2, rh - 2);
     }
 
-    // Draw interactive fans, lights, and exit door dots
+    // Draw interactive fans, lights, and exit door dots on the active floor
     for (const item of this.house.interactives) {
+      if (item.room.floor !== activeFloor) continue;
       const pt = toMap(item.x, item.z);
       ctx.beginPath();
       if (item.kind === 'fan') {
@@ -550,6 +593,22 @@ class HouseExplorerGame {
         ctx.arc(pt.x, pt.y, 5, 0, Math.PI * 2);
       }
       ctx.fill();
+    }
+
+    // Draw staircase icon on minimap if this house has a 2nd floor
+    if (this.house.hasSecondFloor && this.house.stairwell) {
+      const sw = this.house.stairwell;
+      const stPt = toMap(sw.cx, (sw.zBottom + sw.zTop) * 0.5);
+      ctx.fillStyle = '#d48cff';
+      ctx.fillRect(stPt.x - 4, stPt.y - 7, 8, 14);
+    }
+
+    // Floor indicator label in top-left of minimap
+    if (this.house.hasSecondFloor) {
+      ctx.font = '800 11px -apple-system, BlinkMacSystemFont, sans-serif';
+      ctx.fillStyle = activeFloor === 1 ? '#38d9ff' : '#ffb72b';
+      ctx.textAlign = 'left';
+      ctx.fillText(activeFloor === 1 ? '🪜 2ND FLOOR' : '🏠 1ST FLOOR', 8, 15);
     }
 
     // Draw Player Arrow

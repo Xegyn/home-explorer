@@ -182,9 +182,26 @@ export class Cozy3DRenderer {
         currentRoomDepth = 0;
         return;
       }
-      const dx = room.cx - this.camera.x;
-      const dz = room.cz - this.camera.z;
-      currentRoomDepth = Math.hypot(dx, dz);
+      // Compute 3D Euclidean distance from camera to the room's 3D Bounding Box (AABB)!
+      // For the room the camera is currently inside, dxAABB = dyAABB = dzAABB = 0 (aabbDist = 0),
+      // guaranteeing that neighboring rooms behind walls or on another floor NEVER sort in front
+      // of the current room's walls or ceiling when walking close to a wall in a large rectangular room!
+      const dxAABB = Math.max(0, room.minX - this.camera.x, this.camera.x - room.maxX);
+      const dyAABB = Math.max(
+        0,
+        room.baseY - this.camera.y,
+        this.camera.y - (room.baseY + house.wallHeight)
+      );
+      const dzAABB = Math.max(0, room.minZ - this.camera.z, this.camera.z - room.maxZ);
+      const aabbDist = Math.hypot(dxAABB, dyAABB, dzAABB);
+
+      // Deterministic tie-breaker using distance to room center
+      const dxCenter = room.cx - this.camera.x;
+      const dyCenter = (room.baseY + house.wallHeight * 0.5) - this.camera.y;
+      const dzCenter = room.cz - this.camera.z;
+      const centerDist = Math.hypot(dxCenter, dyCenter, dzCenter);
+
+      currentRoomDepth = aabbDist + centerDist * 0.001;
     };
 
     // Helper to enqueue a 3D world-space quad or polygon
@@ -216,12 +233,12 @@ export class Cozy3DRenderer {
         camVerts.push(c);
       }
 
-      if (maxZ < 0.12) return;
+      if (maxZ < 0.05) return;
       const n = worldVerts.length;
       const avgDistSq = (sumX / n) ** 2 + (sumY / n) ** 2 + (sumZ / n) ** 2;
-      if (avgDistSq > 360) return; // Distance cull > 19m
+      if (avgDistSq > 480) return; // Distance cull > 21.9m
 
-      const clipped = this.clipPolygonNear(camVerts, 0.12);
+      const clipped = this.clipPolygonNear(camVerts, 0.05);
       if (clipped.length < 3) return;
 
       const screenPts = clipped.map((pt) => this.projectCameraPoint(pt));
