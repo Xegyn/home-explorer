@@ -1,9 +1,9 @@
 // Main Game Loop, Controls (Keyboard + Mouse + Touch D-Pad + USB/Bluetooth Gamepad),
 // Interactive Fan/Light Toggling, Checklist Evaluation, and Floorplan Minimap!
 
-import { Cozy3DRenderer } from './renderer.js?v=12';
-import { ProceduralHouse, FAN_SPEED_LABELS } from './house.js?v=12';
-import { sound } from './audio.js?v=12';
+import { Cozy3DRenderer } from './renderer.js?v=14';
+import { ProceduralHouse, FAN_SPEED_LABELS } from './house.js?v=14';
+import { sound } from './audio.js?v=14';
 
 class HouseExplorerGame {
   constructor() {
@@ -29,6 +29,7 @@ class HouseExplorerGame {
 
     this.welcomeDialog = document.getElementById('welcome-dialog');
     this.victoryDialog = document.getElementById('victory-dialog');
+    this.confirmNewHouseDialog = document.getElementById('confirm-new-house-dialog');
 
     // Game State
     this.levelNumber = 1;
@@ -245,9 +246,35 @@ class HouseExplorerGame {
     this.elPromptState.textContent = this.describeInteractiveState(target);
   }
 
+  promptNewHouse() {
+    sound.playSwitch(true);
+    this.keys.clear();
+    if (
+      this.confirmNewHouseDialog &&
+      typeof this.confirmNewHouseDialog.showModal === 'function' &&
+      !this.confirmNewHouseDialog.open
+    ) {
+      this.confirmNewHouseDialog.showModal();
+    }
+  }
+
   bindEvents() {
     // Keyboard listeners
     window.addEventListener('keydown', (e) => {
+      if (this.confirmNewHouseDialog && this.confirmNewHouseDialog.open) {
+        if (e.code === 'Enter') {
+          e.preventDefault();
+          sound.playSwitch(true);
+          this.confirmNewHouseDialog.close();
+          this.startNewHouse(this.levelNumber + 1);
+        } else if (e.code === 'Escape') {
+          e.preventDefault();
+          sound.playSwitch(false);
+          this.confirmNewHouseDialog.close();
+        }
+        return;
+      }
+
       if (this.welcomeDialog.open || this.victoryDialog.open) {
         if (e.code === 'Enter' || e.code === 'Space') {
           e.preventDefault();
@@ -270,7 +297,8 @@ class HouseExplorerGame {
       } else if (e.code === 'KeyF') {
         this.toggleFlashlight();
       } else if (e.code === 'KeyN') {
-        this.startNewHouse(this.levelNumber + 1);
+        e.preventDefault();
+        this.promptNewHouse();
       } else if (e.code === 'KeyH') {
         if (!this.welcomeDialog.open) this.welcomeDialog.showModal();
       }
@@ -338,7 +366,17 @@ class HouseExplorerGame {
     });
 
     document.getElementById('btn-new-house').addEventListener('click', () => {
+      this.promptNewHouse();
+    });
+
+    document.getElementById('btn-cancel-new-house').addEventListener('click', () => {
+      sound.playSwitch(false);
+      this.confirmNewHouseDialog.close();
+    });
+
+    document.getElementById('btn-confirm-new-house').addEventListener('click', () => {
       sound.playSwitch(true);
+      this.confirmNewHouseDialog.close();
       this.startNewHouse(this.levelNumber + 1);
     });
 
@@ -395,7 +433,13 @@ class HouseExplorerGame {
   }
 
   updateMovement(dt) {
-    if (this.welcomeDialog.open || this.victoryDialog.open) return;
+    if (
+      this.welcomeDialog.open ||
+      this.victoryDialog.open ||
+      (this.confirmNewHouseDialog && this.confirmNewHouseDialog.open)
+    ) {
+      return;
+    }
 
     const cam = this.renderer.camera;
     let moveForward = 0;

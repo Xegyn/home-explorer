@@ -158,6 +158,25 @@
     </div>
   </dialog>
 
-  <script type="module" src="./src/main.js?v=12"></script>
+  <!-- New House Confirmation Dialog -->
+  <dialog id="confirm-new-house-dialog" class="game-dialog">
+    <div class="dialog-card">
+      <div class="dialog-badge">🎲 🏠 ✨</div>
+      <h1>Visit a New House?</h1>
+      <p class="dialog-lead">
+        Are you sure you want to leave this house and generate a brand-new house to explore?
+      </p>
+      <div class="dialog-footer dialog-footer-split">
+        <button id="btn-cancel-new-house" class="cancel-btn" type="button">
+          ↩️ Stay in This House
+        </button>
+        <button id="btn-confirm-new-house" class="start-btn" type="button" autofocus>
+          🏠 Yes, New House!
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./src/main.js?v=14"></script>
 </body>
 </html>

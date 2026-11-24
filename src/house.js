@@ -696,12 +696,13 @@ export class ProceduralHouse {
 
   placeRoomFurnitureAndFixtures(room) {
     const by = room.baseY;
-    // Pick safe corners of the room (away from center and doorways)
+    room.tallWallItems = [];
+    // Pick snug corners of the room (0.58m from corner walls so standing fans & floor lamps sit right in the corners!)
     const corners = [
-      { x: room.minX + 0.9, z: room.maxZ - 0.9, dirYaw: -Math.PI * 0.25 },
-      { x: room.maxX - 0.9, z: room.maxZ - 0.9, dirYaw: -Math.PI * 0.75 },
-      { x: room.minX + 0.9, z: room.minZ + 0.9, dirYaw: Math.PI * 0.25 },
-      { x: room.maxX - 0.9, z: room.minZ + 0.9, dirYaw: Math.PI * 0.75 },
+      { x: room.minX + 0.58, z: room.maxZ - 0.58, dirYaw: -Math.PI * 0.25 },
+      { x: room.maxX - 0.58, z: room.maxZ - 0.58, dirYaw: -Math.PI * 0.75 },
+      { x: room.minX + 0.58, z: room.minZ + 0.58, dirYaw: Math.PI * 0.25 },
+      { x: room.maxX - 0.58, z: room.minZ + 0.58, dirYaw: Math.PI * 0.75 },
     ];
     const shuffledCorners = this.rng.shuffle(corners);
 
@@ -731,9 +732,9 @@ export class ProceduralHouse {
       currentAngularVel: FAN_SPEED_RAD_PER_SEC[initSpeed],
     });
     room.portableFan = portableFan;
-    this.addCollider(fanCorner.x, fanCorner.z, 0.35, 0.35, room.floor);
+    this.addCollider(fanCorner.x, fanCorner.z, 0.34, 0.34, room.floor);
 
-    // Corner 2: Cozy Floor Lamp or Table Lamp
+    // Corner 2: Cozy Floor Lamp
     const lampCorner = availableCorners[1] || shuffledCorners[1];
     const lampOn = this.rng.next() < 0.5;
     const floorLamp = this.registerInteractive({
@@ -755,21 +756,21 @@ export class ProceduralHouse {
       colorB: 0.62,
     });
     room.lights.push(floorLamp);
-    this.addCollider(lampCorner.x, lampCorner.z, 0.32, 0.32, room.floor);
+    this.addCollider(lampCorner.x, lampCorner.z, 0.3, 0.3, room.floor);
 
-    // Corners 3 & 4: Rich Room-Specific Furniture (or Dedicated Center Grand Staircase!)
-    const furnCornerA = shuffledCorners[2];
-    const furnCornerB = shuffledCorners[3];
+    // Corner 3: Cozy Corner Potted Plant
+    const plantCorner = availableCorners[2] || shuffledCorners[2];
+    if (plantCorner) {
+      this.addPottedPlant(room, plantCorner.x, plantCorner.z);
+    }
 
     if (room.hasStairsUp || room.hasStairsDown) {
       // Dedicated Grand Staircase Hall: keep all 4 walls and walkways spacious and uncluttered!
-      const eastCorners = corners.filter((c) => c.x > room.cx);
-      this.addPottedPlant(room, eastCorners[0].x, eastCorners[0].z);
       if (room.hasStairsUp) {
         this.buildClimbableStaircase(room);
       }
     } else {
-      this.addFurnitureForTheme(room, furnCornerA, furnCornerB);
+      this.addFurnitureForTheme(room);
     }
 
     this.addWallDecorForRoom(room);
@@ -989,8 +990,30 @@ export class ProceduralHouse {
     room.lights.push(lamp);
   }
 
+  // Find a clear horizontal coordinate `u` along `side` wall that doesn't overlap any tall bookshelf or refrigerator!
+  findClearWallDecorCoord(room, side, itemHalfW = 0.85) {
+    const isNS = side === 'north' || side === 'south';
+    const uMin = (isNS ? room.minX : room.minZ) + 1.15 + itemHalfW;
+    const uMax = (isNS ? room.maxX : room.maxZ) - 1.15 - itemHalfW;
+    const centerU = isNS ? room.cx : room.cz;
+    const candidates = [
+      centerU,
+      centerU - 1.55,
+      centerU + 1.55,
+      centerU - 2.6,
+      centerU + 2.6,
+    ];
+    const tallItems = (room.tallWallItems || []).filter((it) => it.side === side);
+    for (const u of candidates) {
+      if (u < uMin || u > uMax) continue;
+      const blocked = tallItems.some((it) => Math.abs(u - it.u) < (it.halfW + itemHalfW + 0.12));
+      if (!blocked) return u;
+    }
+    return null;
+  }
+
   addWallDecorForRoom(room) {
-    // Place windows on exterior walls (walls without a connecting door, excluding the Foyer south exit wall and West stairwell wall)
+    // Place windows and framed artwork on exterior/door-free walls where no tall bookcase is blocking!
     const hasStairwell = room.hasStairsUp || room.hasStairsDown;
     const wallSpecs = [
       { side: 'north', hasDoor: room.doors.north, isExit: false },
@@ -1004,53 +1027,57 @@ export class ProceduralHouse {
       if (w.hasDoor || w.isExit) continue;
 
       if (!windowAdded) {
-        // Cozy Exterior Window with Sky Glass, Cross Mullions, Sill & Curtains!
-        this.addWindowOnWall(room, w.side);
-        windowAdded = true;
+        const winU = this.findClearWallDecorCoord(room, w.side, 0.92);
+        if (winU !== null) {
+          this.addWindowOnWall(room, w.side, winU);
+          windowAdded = true;
+        }
       } else {
-        // Framed Wall Artwork Painting on the other solid wall!
-        this.addPaintingOnWall(room, w.side);
+        const artU = this.findClearWallDecorCoord(room, w.side, 0.62);
+        if (artU !== null) {
+          this.addPaintingOnWall(room, w.side, artU);
+        }
       }
     }
   }
 
-  addWindowOnWall(room, side) {
+  addWindowOnWall(room, side, uCoord = null) {
     const frameColor = [248, 246, 240];
     const glassColor = [155, 218, 252];
     const sillColor = [235, 228, 216];
     const curtainColor = room.theme.rugColor;
-    const wy = 1.55;
+    const wy = 1.58;
 
     if (side === 'north' || side === 'south') {
       const wz = side === 'north' ? room.maxZ - 0.04 : room.minZ + 0.04;
       const sign = side === 'north' ? -1 : 1;
-      const wx = room.cx;
+      const wx = uCoord ?? room.cx;
       // Outer window frame & sky glass (layers 5, 6, 7 so they never Z-fight!)
-      this.addBox(room, wx, wy, wz, 1.56, 1.24, 0.06, frameColor, { layer: 5 });
-      this.addBox(room, wx, wy, wz + sign * 0.03, 1.38, 1.06, 0.04, glassColor, { emissive: true, layer: 6 });
+      this.addBox(room, wx, wy, wz, 1.56, 1.18, 0.06, frameColor, { layer: 5 });
+      this.addBox(room, wx, wy, wz + sign * 0.03, 1.38, 1.0, 0.04, glassColor, { emissive: true, layer: 6 });
       // Crossbars (mullions)
       this.addBox(room, wx, wy, wz + sign * 0.05, 1.4, 0.06, 0.03, frameColor, { layer: 7 });
-      this.addBox(room, wx, wy, wz + sign * 0.05, 0.06, 1.08, 0.03, frameColor, { layer: 7 });
-      // Window Sill
-      this.addBox(room, wx, wy - 0.64, wz + sign * 0.06, 1.72, 0.07, 0.14, sillColor, { layer: 7 });
+      this.addBox(room, wx, wy, wz + sign * 0.05, 0.06, 1.02, 0.03, frameColor, { layer: 7 });
+      // Window Sill (at y = 0.97m so low furniture <= 0.95m fits cleanly underneath!)
+      this.addBox(room, wx, wy - 0.61, wz + sign * 0.06, 1.72, 0.07, 0.14, sillColor, { layer: 7 });
       // Left & Right Cozy Curtains
-      this.addBox(room, wx - 0.84, wy - 0.05, wz + sign * 0.06, 0.24, 1.42, 0.1, curtainColor, { layer: 7 });
-      this.addBox(room, wx + 0.84, wy - 0.05, wz + sign * 0.06, 0.24, 1.42, 0.1, curtainColor, { layer: 7 });
+      this.addBox(room, wx - 0.84, wy - 0.02, wz + sign * 0.06, 0.24, 1.34, 0.1, curtainColor, { layer: 7 });
+      this.addBox(room, wx + 0.84, wy - 0.02, wz + sign * 0.06, 0.24, 1.34, 0.1, curtainColor, { layer: 7 });
     } else {
       const wx = side === 'east' ? room.maxX - 0.04 : room.minX + 0.04;
-      const wz = room.cz;
+      const wz = uCoord ?? room.cz;
       const sign = side === 'east' ? -1 : 1;
-      this.addBox(room, wx, wy, wz, 0.06, 1.24, 1.56, frameColor, { layer: 5 });
-      this.addBox(room, wx + sign * 0.03, wy, wz, 0.04, 1.06, 1.38, glassColor, { emissive: true, layer: 6 });
+      this.addBox(room, wx, wy, wz, 0.06, 1.18, 1.56, frameColor, { layer: 5 });
+      this.addBox(room, wx + sign * 0.03, wy, wz, 0.04, 1.0, 1.38, glassColor, { emissive: true, layer: 6 });
       this.addBox(room, wx + sign * 0.05, wy, wz, 0.03, 0.06, 1.4, frameColor, { layer: 7 });
-      this.addBox(room, wx + sign * 0.05, wy, wz, 0.03, 1.08, 0.06, frameColor, { layer: 7 });
-      this.addBox(room, wx + sign * 0.06, wy - 0.64, wz, 0.14, 0.07, 1.72, sillColor, { layer: 7 });
-      this.addBox(room, wx + sign * 0.06, wy - 0.05, wz - 0.84, 0.1, 1.42, 0.24, curtainColor, { layer: 7 });
-      this.addBox(room, wx + sign * 0.06, wy - 0.05, wz + 0.84, 0.1, 1.42, 0.24, curtainColor, { layer: 7 });
+      this.addBox(room, wx + sign * 0.05, wy, wz, 0.03, 1.02, 0.06, frameColor, { layer: 7 });
+      this.addBox(room, wx + sign * 0.06, wy - 0.61, wz, 0.14, 0.07, 1.72, sillColor, { layer: 7 });
+      this.addBox(room, wx + sign * 0.06, wy - 0.02, wz - 0.84, 0.1, 1.34, 0.24, curtainColor, { layer: 7 });
+      this.addBox(room, wx + sign * 0.06, wy - 0.02, wz + 0.84, 0.1, 1.34, 0.24, curtainColor, { layer: 7 });
     }
   }
 
-  addPaintingOnWall(room, side) {
+  addPaintingOnWall(room, side, uCoord = null) {
     const frameColor = [112, 78, 52];
     const canvasColors = [
       [234, 168, 92],
@@ -1059,130 +1086,431 @@ export class ProceduralHouse {
       [124, 184, 132],
     ];
     const artColor = this.rng.pick(canvasColors);
-    const py = 1.62;
+    const py = 1.66;
 
     if (side === 'north' || side === 'south') {
       const pz = side === 'north' ? room.maxZ - 0.04 : room.minZ + 0.04;
       const sign = side === 'north' ? -1 : 1;
-      this.addBox(room, room.cx, py, pz, 1.12, 0.78, 0.05, frameColor, { layer: 5 });
-      this.addBox(room, room.cx, py, pz + sign * 0.03, 0.96, 0.62, 0.04, artColor, { layer: 6 });
+      const px = uCoord ?? room.cx;
+      this.addBox(room, px, py, pz, 1.12, 0.78, 0.05, frameColor, { layer: 5 });
+      this.addBox(room, px, py, pz + sign * 0.03, 0.96, 0.62, 0.04, artColor, { layer: 6 });
     } else {
       const px = side === 'east' ? room.maxX - 0.04 : room.minX + 0.04;
       const sign = side === 'east' ? -1 : 1;
-      this.addBox(room, px, py, room.cz, 0.05, 0.78, 1.12, frameColor, { layer: 5 });
-      this.addBox(room, px + sign * 0.03, py, room.cz, 0.04, 0.62, 0.96, artColor, { layer: 6 });
+      const pz = uCoord ?? room.cz;
+      this.addBox(room, px, py, pz, 0.05, 0.78, 1.12, frameColor, { layer: 5 });
+      this.addBox(room, px + sign * 0.03, py, pz, 0.04, 0.62, 0.96, artColor, { layer: 6 });
     }
   }
 
-  // Build a realistic wooden bookshelf with top/bottom trim and 3 colorful book rows (non-overlapping boxes!)
-  addBookshelf(room, x, z, frontSignZ = 1, width = 1.24, height = 1.72) {
-    const woodColor = [142, 94, 58];
-    const trimColor = [122, 78, 46];
-    const depth = 0.44;
-    // Main bookcase body
-    this.addBox(room, x, height * 0.5, z, width, height, depth, woodColor);
-    // Crown top cap sitting cleanly above main body
-    this.addBox(room, x, height + 0.03, z, width + 0.06, 0.06, depth + 0.04, trimColor);
-    // 3 rows of colorful book spines protruding cleanly on the front face
-    const faceZ = z + frontSignZ * (depth * 0.5 + 0.03);
-    this.addBox(room, x - width * 0.2, 0.48, faceZ, width * 0.38, 0.28, 0.06, [224, 88, 78]);
-    this.addBox(room, x + width * 0.22, 0.46, faceZ, width * 0.32, 0.24, 0.06, [238, 178, 74]);
-    this.addBox(room, x + width * 0.16, 0.96, faceZ, width * 0.44, 0.28, 0.06, [74, 158, 210]);
-    this.addBox(room, x - width * 0.24, 0.94, faceZ, width * 0.28, 0.24, 0.06, [156, 108, 192]);
-    this.addBox(room, x - width * 0.14, 1.42, faceZ, width * 0.46, 0.26, 0.06, [88, 182, 118]);
-    this.addBox(room, x + width * 0.24, 1.40, faceZ, width * 0.26, 0.22, 0.06, [232, 132, 78]);
-    this.addCollider(x, z, width * 0.5 + 0.04, depth * 0.5 + 0.06, room.floor);
+  // ============================================================================
+  // Wall-Flush Coordinate Helpers:
+  // Automatically orient any furniture piece so its back sits FLUSH against
+  // the North, South, East, or West wall and its front faces into the room!
+  // ============================================================================
+  wallCoords(room, side, uAlong, depthFromWall, widthAlong = 0, depthOut = 0) {
+    if (side === 'north') {
+      return { x: uAlong, z: room.maxZ - depthFromWall, w: widthAlong, d: depthOut };
+    }
+    if (side === 'south') {
+      return { x: uAlong, z: room.minZ + depthFromWall, w: widthAlong, d: depthOut };
+    }
+    if (side === 'east') {
+      return { x: room.maxX - depthFromWall, z: uAlong, w: depthOut, d: widthAlong };
+    }
+    // 'west'
+    return { x: room.minX + depthFromWall, z: uAlong, w: depthOut, d: widthAlong };
   }
 
-  addFurnitureForTheme(room, cornerA, cornerB) {
+  addWallBox(room, side, uAlong, depthFromWall, y, widthAlong, height, depthOut, color, options = {}) {
+    const c = this.wallCoords(room, side, uAlong, depthFromWall, widthAlong, depthOut);
+    this.addBox(room, c.x, y, c.z, c.w, height, c.d, color, options);
+  }
+
+  addWallCollider(room, side, uAlong, depthFromWall, widthAlong, depthOut) {
+    const c = this.wallCoords(room, side, uAlong, depthFromWall, widthAlong, depthOut);
+    this.addCollider(c.x, c.z, c.w * 0.5, c.d * 0.5, room.floor);
+  }
+
+  addWallDeskLamp(room, side, uAlong, depthFromWall, baseTopY, labelName) {
+    const c = this.wallCoords(room, side, uAlong, depthFromWall, 0, 0);
+    this.addDeskLamp(room, c.x, baseTopY, c.z, labelName);
+  }
+
+  registerTallWallItem(room, side, uAlong, widthAlong) {
+    if (!room.tallWallItems) room.tallWallItems = [];
+    room.tallWallItems.push({ side, u: uAlong, halfW: widthAlong * 0.5 });
+  }
+
+  // 1. Tall Wooden Bookshelf (flush against `side` wall, with 3 rows of colorful books)
+  addWallTallBookshelf(room, side, u, width = 1.24, height = 1.76) {
+    const woodColor = [142, 94, 58];
+    const trimColor = [118, 74, 44];
+    const depth = 0.38;
+    const centerD = 0.03 + depth * 0.5; // 0.22m from wall (back face at 0.03m flush with wall!)
+    // Main bookcase cabinet
+    this.addWallBox(room, side, u, centerD, height * 0.5, width, height, depth, woodColor);
+    // Crown top molding cap
+    this.addWallBox(room, side, u, centerD + 0.01, height + 0.03, width + 0.06, 0.06, depth + 0.04, trimColor);
+    // 3 rows of colorful vertical book stacks protruding cleanly on the front shelf face
+    const bookD = 0.03 + depth + 0.03;
+    this.addWallBox(room, side, u - width * 0.21, bookD, 0.46, width * 0.38, 0.28, 0.06, [224, 88, 78]);
+    this.addWallBox(room, side, u + width * 0.22, bookD, 0.44, width * 0.32, 0.24, 0.06, [238, 178, 74]);
+    this.addWallBox(room, side, u + width * 0.16, bookD, 0.96, width * 0.44, 0.28, 0.06, [74, 158, 210]);
+    this.addWallBox(room, side, u - width * 0.24, bookD, 0.94, width * 0.28, 0.24, 0.06, [156, 108, 192]);
+    this.addWallBox(room, side, u - width * 0.15, bookD, 1.44, width * 0.46, 0.26, 0.06, [88, 182, 118]);
+    this.addWallBox(room, side, u + width * 0.24, bookD, 1.42, width * 0.26, 0.22, 0.06, [232, 132, 78]);
+    this.addWallCollider(room, side, u, centerD, width + 0.06, depth + 0.1);
+    this.registerTallWallItem(room, side, u, width + 0.12);
+  }
+
+  // 2. Wide Low Credenza Bookcase (waist-high shelf flush against `side` wall, with books & tabletop decor)
+  addWallLowBookcase(room, side, u, width = 1.36) {
+    const woodColor = [156, 106, 68];
+    const topColor = [178, 126, 82];
+    const height = 0.86;
+    const depth = 0.40;
+    const centerD = 0.03 + depth * 0.5;
+    this.addWallBox(room, side, u, centerD, height * 0.5, width, height, depth, woodColor);
+    this.addWallBox(room, side, u, centerD + 0.01, height + 0.03, width + 0.06, 0.06, depth + 0.04, topColor);
+    // 2 shelves of colorful books on the front face
+    const bookD = 0.03 + depth + 0.03;
+    this.addWallBox(room, side, u - width * 0.22, bookD, 0.28, width * 0.36, 0.22, 0.06, [82, 164, 198]);
+    this.addWallBox(room, side, u + width * 0.2, bookD, 0.27, width * 0.34, 0.2, 0.06, [226, 112, 86]);
+    this.addWallBox(room, side, u - width * 0.18, bookD, 0.66, width * 0.42, 0.22, 0.06, [118, 184, 112]);
+    this.addWallBox(room, side, u + width * 0.24, bookD, 0.65, width * 0.28, 0.2, 0.06, [238, 184, 78]);
+    // Small decorative ceramic planter & book stack sitting cleanly on top of the low bookcase
+    this.addWallBox(room, side, u - 0.32, centerD, height + 0.12, 0.2, 0.12, 0.2, [212, 114, 78]);
+    this.addWallBox(room, side, u - 0.32, centerD, height + 0.24, 0.26, 0.12, 0.26, [76, 168, 98]);
+    this.addWallBox(room, side, u + 0.28, centerD, height + 0.09, 0.34, 0.06, 0.24, [196, 88, 98]);
+    this.addWallCollider(room, side, u, centerD, width + 0.06, depth + 0.08);
+  }
+
+  // 3. Tiered Display & Cubby Shelf (flush against `side` wall, with storage baskets, books & curios)
+  addWallDisplayShelf(room, side, u, width = 1.18) {
+    const frameColor = [228, 222, 210];
+    const woodAccent = [168, 118, 76];
+    const height = 1.38;
+    const depth = 0.38;
+    const centerD = 0.03 + depth * 0.5;
+    this.addWallBox(room, side, u, centerD, height * 0.5, width, height, depth, frameColor);
+    this.addWallBox(room, side, u, centerD + 0.01, height + 0.03, width + 0.04, 0.06, depth + 0.04, woodAccent);
+    // Colorful cubby bins and display items on the front face
+    const frontD = 0.03 + depth + 0.03;
+    this.addWallBox(room, side, u - 0.28, frontD, 0.32, 0.38, 0.28, 0.06, [232, 146, 74]);
+    this.addWallBox(room, side, u + 0.28, frontD, 0.32, 0.38, 0.28, 0.06, [78, 168, 154]);
+    this.addWallBox(room, side, u - 0.26, frontD, 0.78, 0.42, 0.24, 0.06, [104, 142, 208]);
+    this.addWallBox(room, side, u + 0.26, frontD, 0.78, 0.36, 0.24, 0.06, [224, 96, 112]);
+    this.addWallBox(room, side, u, frontD, 1.18, 0.56, 0.22, 0.06, [142, 188, 96]);
+    this.addWallCollider(room, side, u, centerD, width + 0.06, depth + 0.08);
+    this.registerTallWallItem(room, side, u, width + 0.1);
+  }
+
+  // 4. Plush 3-Seater Couch / Sofa (flush against `side` wall, with optional coffee table in front)
+  addWallCouch(room, side, u, sofaColor = [78, 118, 168], backColor = [62, 98, 146], withCoffeeTable = false) {
+    // Backrest cushion flush against the wall (depth 0.03 to 0.25 -> center 0.14, height 0.48 to 0.90)
+    this.addWallBox(room, side, u, 0.14, 0.69, 1.44, 0.42, 0.22, backColor);
+    // Seat base & plush seat cushion (depth 0.03 to 0.77 -> center 0.40, height 0 to 0.48)
+    this.addWallBox(room, side, u, 0.40, 0.24, 1.44, 0.48, 0.74, sofaColor);
+    // Left and right armrests sitting cleanly outside the 1.44m seat width (at u ± 0.83, width 0.22)
+    this.addWallBox(room, side, u - 0.83, 0.41, 0.34, 0.22, 0.68, 0.76, backColor);
+    this.addWallBox(room, side, u + 0.83, 0.41, 0.34, 0.22, 0.68, 0.76, backColor);
+    // Colorful throw pillows sitting cleanly on top of the seat cushion in front of the backrest
+    this.addWallBox(room, side, u - 0.46, 0.34, 0.59, 0.3, 0.22, 0.18, [242, 178, 72]);
+    this.addWallBox(room, side, u + 0.46, 0.34, 0.59, 0.3, 0.22, 0.18, [232, 108, 92]);
+    this.addWallCollider(room, side, u, 0.41, 1.88, 0.78);
+
+    if (withCoffeeTable) {
+      // Wooden Coffee Table placed 1.36m in front of the wall (leaving a walkable gap in front of the couch)
+      const ctD = 1.38;
+      this.addWallBox(room, side, u, ctD, 0.21, 1.02, 0.42, 0.48, [152, 104, 66]);
+      this.addWallBox(room, side, u, ctD, 0.45, 1.1, 0.06, 0.54, [178, 126, 82]);
+      this.addWallBox(room, side, u - 0.18, ctD, 0.505, 0.32, 0.05, 0.22, [218, 96, 84]);
+      this.addWallCollider(room, side, u, ctD, 1.12, 0.56);
+    }
+  }
+
+  // 5. Cozy Upholstered Reading Armchair / Accent Chair (flush against `side` wall)
+  addWallArmchair(room, side, u, chairColor = [196, 118, 78], darkColor = [172, 98, 62], cushionColor = [244, 214, 138]) {
+    // Backrest flush against the wall
+    this.addWallBox(room, side, u, 0.14, 0.68, 0.62, 0.44, 0.2, darkColor);
+    // Seat cushion
+    this.addWallBox(room, side, u, 0.38, 0.23, 0.62, 0.46, 0.68, chairColor);
+    // Left and right armrests
+    this.addWallBox(room, side, u - 0.40, 0.39, 0.32, 0.18, 0.64, 0.70, darkColor);
+    this.addWallBox(room, side, u + 0.40, 0.39, 0.32, 0.18, 0.64, 0.70, darkColor);
+    // Cozy lumbar throw pillow
+    this.addWallBox(room, side, u, 0.31, 0.55, 0.36, 0.18, 0.14, cushionColor);
+    this.addWallCollider(room, side, u, 0.39, 0.98, 0.72);
+  }
+
+  // 6. Wooden Bedroom Dresser / Chest of Drawers (flush against `side` wall)
+  addWallDresser(room, side, u, width = 1.24) {
+    const bodyColor = [138, 92, 58];
+    const topColor = [164, 112, 72];
+    const drawerColor = [156, 106, 68];
+    const depth = 0.46;
+    const centerD = 0.03 + depth * 0.5;
+    this.addWallBox(room, side, u, centerD, 0.42, width, 0.84, depth, bodyColor);
+    this.addWallBox(room, side, u, centerD + 0.01, 0.87, width + 0.06, 0.06, depth + 0.04, topColor);
+    // 4 Drawer fronts on the room-facing face
+    const frontD = 0.03 + depth + 0.025;
+    for (const du of [-width * 0.24, width * 0.24]) {
+      this.addWallBox(room, side, u + du, frontD, 0.26, width * 0.42, 0.26, 0.04, drawerColor);
+      this.addWallBox(room, side, u + du, frontD, 0.62, width * 0.42, 0.26, 0.04, drawerColor);
+    }
+    // Decorative jewelry/keepsake box on top
+    this.addWallBox(room, side, u + 0.22, centerD, 0.95, 0.3, 0.1, 0.22, [214, 168, 92]);
+    this.addWallCollider(room, side, u, centerD, width + 0.06, depth + 0.08);
+  }
+
+  // 7. Cozy Bed (Headboard flush against `side` wall) + Attached Bedside Nightstand & Bedside Table Lamp!
+  addWallBedAndNightstand(room, side, u) {
+    const bedU = u - 0.32;
+    // Wooden headboard flush against wall (depth 0.03 to 0.17 -> center 0.10)
+    this.addWallBox(room, side, bedU, 0.10, 0.58, 1.44, 0.92, 0.14, [118, 78, 52]);
+    // Upper mattress section (depth 0.17 to 0.89 -> center 0.53)
+    this.addWallBox(room, side, bedU, 0.53, 0.26, 1.38, 0.52, 0.72, [242, 238, 246]);
+    // Twin pillows resting on top of upper mattress
+    this.addWallBox(room, side, bedU - 0.34, 0.44, 0.59, 0.48, 0.14, 0.32, [252, 250, 255]);
+    this.addWallBox(room, side, bedU + 0.34, 0.44, 0.59, 0.48, 0.14, 0.32, [252, 250, 255]);
+    // Lower duvet blanket section extending into the room (depth 0.89 to 1.89 -> center 1.39)
+    this.addWallBox(room, side, bedU, 1.39, 0.27, 1.40, 0.54, 1.0, [148, 106, 186]);
+    this.addWallCollider(room, side, bedU, 0.96, 1.44, 1.88);
+
+    // Bedside Nightstand flush against the same wall right beside the head of the bed!
+    const nsU = bedU + 1.06;
+    this.addWallBox(room, side, nsU, 0.25, 0.32, 0.52, 0.64, 0.44, [132, 92, 62]);
+    this.addWallBox(room, side, nsU, 0.49, 0.42, 0.4, 0.2, 0.04, [158, 114, 78]);
+    this.addWallDeskLamp(room, side, nsU, 0.25, 0.64, 'Bedside Table Lamp');
+    this.addWallCollider(room, side, nsU, 0.26, 0.56, 0.48);
+  }
+
+  // 8. Executive Home Office Desk (flush against `side` wall) with Monitor, Office Chair & Desk Lamp!
+  addWallOfficeDesk(room, side, u) {
+    const depth = 0.66;
+    const centerD = 0.03 + depth * 0.5; // 0.36m from wall
+    // Left and right drawer pedestals (y = 0 to 0.70)
+    this.addWallBox(room, side, u - 0.46, centerD, 0.35, 0.36, 0.7, depth, [138, 92, 56]);
+    this.addWallBox(room, side, u + 0.46, centerD, 0.35, 0.36, 0.7, depth, [138, 92, 56]);
+    // Wide walnut desktop sitting cleanly on top (y = 0.70 to 0.78)
+    this.addWallBox(room, side, u, centerD + 0.02, 0.74, 1.38, 0.08, depth + 0.04, [168, 116, 72]);
+    // Desktop Computer Monitor (stand + bezel + glowing screen facing the chair)
+    this.addWallBox(room, side, u - 0.22, 0.22, 0.83, 0.12, 0.1, 0.1, [48, 52, 62]);
+    this.addWallBox(room, side, u - 0.22, 0.22, 1.02, 0.54, 0.34, 0.05, [38, 42, 52]);
+    this.addWallBox(room, side, u - 0.22, 0.26, 1.02, 0.48, 0.28, 0.02, [86, 168, 224], { emissive: true });
+    // Interactive Office Desk Lamp on the other side of the desk
+    this.addWallDeskLamp(room, side, u + 0.38, centerD, 0.78, 'Office Desk Lamp');
+    // Ergonomic Swivel Office Chair tucked in front of the desk
+    const chairD = 0.92;
+    this.addWallBox(room, side, u, chairD, 0.21, 0.14, 0.42, 0.14, [58, 62, 72]);
+    this.addWallBox(room, side, u, chairD, 0.46, 0.46, 0.08, 0.44, [68, 108, 148]);
+    this.addWallBox(room, side, u, chairD + 0.18, 0.71, 0.44, 0.42, 0.08, [58, 94, 132]);
+    this.addWallCollider(room, side, u, 0.58, 1.4, 1.12);
+  }
+
+  // 9. Widescreen TV & Media Credenza Console (flush against `side` wall)
+  addWallTVConsole(room, side, u) {
+    const depth = 0.44;
+    const centerD = 0.03 + depth * 0.5;
+    // Media cabinet base
+    this.addWallBox(room, side, u, centerD, 0.28, 1.46, 0.56, depth, [128, 86, 56]);
+    // Widescreen TV bezel & screen sitting cleanly on top of console against the wall
+    this.addWallBox(room, side, u, 0.16, 0.88, 1.16, 0.64, 0.06, [34, 38, 48]);
+    this.addWallBox(room, side, u, 0.205, 0.88, 1.04, 0.52, 0.03, [74, 138, 184]);
+    this.addWallCollider(room, side, u, centerD, 1.48, depth + 0.08);
+  }
+
+  // 10. Fitted Kitchen Counter (Sink, Faucet, Stove Cooktop) & Tall Retro Refrigerator (flush against `side` wall)
+  addWallKitchenCounterAndFridge(room, side, u) {
+    const counterU = u - 0.46;
+    const depth = 0.68;
+    const centerD = 0.03 + depth * 0.5;
+    // Lower kitchen cabinet & cream countertop
+    this.addWallBox(room, side, counterU, centerD, 0.44, 1.54, 0.88, depth, [224, 148, 82]);
+    this.addWallBox(room, side, counterU, centerD + 0.02, 0.92, 1.62, 0.08, depth + 0.04, [246, 244, 238]);
+    // Stainless sink basin & faucet against the wall
+    this.addWallBox(room, side, counterU - 0.38, centerD + 0.04, 0.985, 0.48, 0.05, 0.42, [175, 192, 206]);
+    this.addWallBox(room, side, counterU - 0.38, 0.14, 1.11, 0.06, 0.22, 0.06, [155, 168, 182]);
+    // Dark 4-burner stove cooktop
+    this.addWallBox(room, side, counterU + 0.38, centerD + 0.04, 0.98, 0.52, 0.04, 0.44, [48, 52, 62]);
+    this.addWallCollider(room, side, counterU, centerD, 1.62, depth + 0.08);
+
+    // Tall Retro Refrigerator flush against the wall right beside the counter
+    const fridgeU = counterU + 1.28;
+    const fDepth = 0.68;
+    const fCenterD = 0.03 + fDepth * 0.5;
+    const fFrontD = 0.03 + fDepth + 0.025;
+    this.addWallBox(room, side, fridgeU, fCenterD, 0.88, 0.82, 1.76, fDepth, [238, 244, 248]);
+    this.addWallBox(room, side, fridgeU, fFrontD, 1.24, 0.82, 0.04, 0.03, [170, 182, 194]);
+    this.addWallBox(room, side, fridgeU - 0.28, fFrontD + 0.01, 1.48, 0.05, 0.28, 0.05, [185, 196, 208]);
+    this.addWallBox(room, side, fridgeU - 0.28, fFrontD + 0.01, 0.82, 0.05, 0.44, 0.05, [185, 196, 208]);
+    this.addWallCollider(room, side, fridgeU, fCenterD, 0.86, fDepth + 0.08);
+    this.registerTallWallItem(room, side, fridgeU, 0.9);
+  }
+
+  // Compute all door-free wall spans across the 4 walls of `room`
+  getAvailableWallSpans(room) {
+    const spans = [];
+    const cornerMargin = 1.12; // Leaves corners free for floor lamp, standing/box fan & corner plants
+    const doorClearance = 1.52; // Leaves doorway opening & wall switch plate completely clear
+
+    for (const side of ['north', 'south', 'east', 'west']) {
+      const isNS = side === 'north' || side === 'south';
+      const uMin = (isNS ? room.minX : room.minZ) + cornerMargin;
+      const uMax = (isNS ? room.maxX : room.maxZ) - cornerMargin;
+      if (uMax - uMin < 1.1) continue;
+
+      const isExitWall = side === 'south' && room.gx === 0 && room.gz === 0 && room.floor === 0;
+      const hasDoor = room.doors[side] || isExitWall;
+
+      if (!hasDoor) {
+        spans.push({
+          side,
+          u0: uMin,
+          u1: uMax,
+          uMid: (uMin + uMax) * 0.5,
+          len: uMax - uMin,
+          hasDoor: false,
+        });
+      } else {
+        const dc = room.doorCenters[side];
+        const leftU1 = dc - doorClearance;
+        if (leftU1 - uMin >= 1.15) {
+          spans.push({
+            side,
+            u0: uMin,
+            u1: leftU1,
+            uMid: (uMin + leftU1) * 0.5,
+            len: leftU1 - uMin,
+            hasDoor: true,
+          });
+        }
+        const rightU0 = dc + doorClearance;
+        if (uMax - rightU0 >= 1.15) {
+          spans.push({
+            side,
+            u0: rightU0,
+            u1: uMax,
+            uMid: (rightU0 + uMax) * 0.5,
+            len: uMax - rightU0,
+            hasDoor: true,
+          });
+        }
+      }
+    }
+
+    // Sort longest door-free spans first so the room's primary centerpiece gets the best wall!
+    spans.sort((a, b) => (b.len - (b.hasDoor ? 2 : 0)) - (a.len - (a.hasDoor ? 2 : 0)));
+    return spans;
+  }
+
+  // Subdivide remaining wall spans into individual ~1.35m wall slots for bookshelves, couches, chairs, dressers & consoles
+  collectSecondaryWallSlots(spans) {
+    const slots = [];
+    for (const sp of spans) {
+      if (sp.len >= 4.4) {
+        // Long wall span: fit 2 or 3 pieces of wall furniture side-by-side flush along the wall!
+        if (sp.len >= 6.8) {
+          slots.push({ side: sp.side, u: sp.uMid - 2.25, maxW: 1.45 });
+          slots.push({ side: sp.side, u: sp.uMid, maxW: 1.55 });
+          slots.push({ side: sp.side, u: sp.uMid + 2.25, maxW: 1.45 });
+        } else {
+          slots.push({ side: sp.side, u: sp.uMid - 1.12, maxW: 1.45 });
+          slots.push({ side: sp.side, u: sp.uMid + 1.12, maxW: 1.45 });
+        }
+      } else if (sp.len >= 2.75) {
+        slots.push({ side: sp.side, u: sp.uMid - 0.68, maxW: 1.28 });
+        slots.push({ side: sp.side, u: sp.uMid + 0.68, maxW: 1.28 });
+      } else {
+        slots.push({ side: sp.side, u: sp.uMid, maxW: sp.len - 0.08 });
+      }
+    }
+    return slots;
+  }
+
+  addFurnitureForTheme(room) {
     const t = room.theme.type;
-    const zBackA = cornerA.z > room.cz ? 0.25 : -0.25;
-    const zBackB = cornerB.z > room.cz ? 0.25 : -0.25;
-    const frontSignA = cornerA.z > room.cz ? -1 : 1;
-    const frontSignB = cornerB.z > room.cz ? -1 : 1;
-    const inwardSignXA = cornerA.x < room.cx ? 1 : -1;
-    const inwardSignXB = cornerB.x < room.cx ? 1 : -1;
+    const spans = this.getAvailableWallSpans(room);
+    if (spans.length === 0) return;
+
+    const primarySpan = spans[0];
+    const remainingSpans = spans.slice(1);
+    // If the primary wall is extra long (e.g. a rectangular room wall >= 6.6m), carve out a side slot on the primary wall too!
+    if (primarySpan.len >= 6.6) {
+      remainingSpans.unshift({
+        side: primarySpan.side,
+        u0: primarySpan.uMid + 1.55,
+        u1: primarySpan.u1,
+        uMid: (primarySpan.uMid + 1.55 + primarySpan.u1) * 0.5,
+        len: primarySpan.u1 - (primarySpan.uMid + 1.55),
+        hasDoor: false,
+      });
+      primarySpan.uMid -= 0.85;
+    }
+    const wallSlots = this.collectSecondaryWallSlots(remainingSpans);
 
     if (t === 'living') {
-      // Corner A: Plush Living Room Sofa with Backrest, Armrests & Throw Pillows (non-overlapping boxes!)
-      this.addBox(room, cornerA.x, 0.24, cornerA.z, 1.24, 0.48, 0.76, [78, 118, 168]);
-      this.addBox(room, cornerA.x, 0.69, cornerA.z + zBackA, 1.64, 0.42, 0.24, [64, 102, 150]);
-      this.addBox(room, cornerA.x - 0.72, 0.34, cornerA.z, 0.2, 0.68, 0.78, [64, 102, 150]);
-      this.addBox(room, cornerA.x + 0.72, 0.34, cornerA.z, 0.2, 0.68, 0.78, [64, 102, 150]);
-      this.addBox(room, cornerA.x - 0.38, 0.59, cornerA.z - zBackA * 0.25, 0.3, 0.22, 0.22, [242, 178, 72]);
-      this.addBox(room, cornerA.x + 0.38, 0.59, cornerA.z - zBackA * 0.25, 0.3, 0.22, 0.22, [232, 108, 92]);
-      this.addCollider(cornerA.x, cornerA.z, 0.84, 0.44, room.floor);
+      // Primary Wall: Plush 3-Seater Couch flush against wall + Wooden Coffee Table in front
+      this.addWallCouch(room, primarySpan.side, primarySpan.uMid, [78, 118, 168], [62, 98, 146], true);
 
-      // Wooden Coffee Table right in front of the Sofa
-      const ctZ = cornerA.z + frontSignA * 0.98;
-      this.addBox(room, cornerA.x, 0.21, ctZ, 0.96, 0.42, 0.48, [154, 106, 68]);
-      this.addBox(room, cornerA.x, 0.45, ctZ, 1.04, 0.06, 0.54, [178, 126, 82]);
-      // Art book resting on top of coffee table
-      this.addBox(room, cornerA.x - 0.16, 0.505, ctZ, 0.32, 0.05, 0.24, [218, 96, 84]);
-      this.addCollider(cornerA.x, ctZ, 0.54, 0.3, room.floor);
-
-      // Corner B: TV Media Console + Widescreen TV
-      this.addBox(room, cornerB.x, 0.28, cornerB.z, 1.38, 0.56, 0.54, [128, 86, 56]);
-      this.addBox(room, cornerB.x, 0.92, cornerB.z, 1.12, 0.64, 0.07, [34, 38, 48]);
-      this.addBox(room, cornerB.x, 0.92, cornerB.z + frontSignB * 0.05, 1.0, 0.52, 0.03, [74, 138, 184]);
-      this.addCollider(cornerB.x, cornerB.z, 0.72, 0.35, room.floor);
+      // Other Walls: TV Media Console, Tall Bookshelf, Upholstered Reading Armchair, Low Credenza Bookcase, Display Shelf!
+      const builders = [
+        (s) => this.addWallTVConsole(room, s.side, s.u),
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.24, s.maxW)),
+        (s) => this.addWallArmchair(room, s.side, s.u, [196, 118, 78], [172, 98, 62]),
+        (s) => this.addWallLowBookcase(room, s.side, s.u, Math.min(1.34, s.maxW)),
+        (s) => this.addWallDisplayShelf(room, s.side, s.u, Math.min(1.18, s.maxW)),
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.18, s.maxW)),
+      ];
+      wallSlots.slice(0, builders.length).forEach((slot, idx) => builders[idx](slot));
     } else if (t === 'bedroom') {
-      // Real-World Bedroom Layout:
-      // Corner A: Cozy Bed + Attached Bedside Nightstand with Interactive Bedside Table Lamp!
-      const bedX = cornerA.x - inwardSignXA * 0.08;
-      // Upper mattress section (under pillows)
-      this.addBox(room, bedX, 0.26, cornerA.z + zBackA * 1.4, 1.36, 0.52, 0.76, [242, 238, 246]);
-      // Lower duvet blanket section
-      this.addBox(room, bedX, 0.27, cornerA.z - zBackA * 0.65, 1.38, 0.54, 1.04, [148, 106, 186]);
-      // Wooden Headboard behind mattress
-      this.addBox(room, bedX, 0.64, cornerA.z + zBackA * 3.1, 1.42, 0.78, 0.14, [118, 78, 52]);
-      // Twin Pillows sitting cleanly on top of upper mattress
-      this.addBox(room, bedX - 0.34, 0.59, cornerA.z + zBackA * 1.6, 0.48, 0.14, 0.34, [252, 250, 255]);
-      this.addBox(room, bedX + 0.34, 0.59, cornerA.z + zBackA * 1.6, 0.48, 0.14, 0.34, [252, 250, 255]);
-      this.addCollider(bedX, cornerA.z, 0.72, 0.85, room.floor);
+      // Primary Wall: Cozy Bed (headboard flush against wall) + Attached Bedside Nightstand & Bedside Table Lamp!
+      this.addWallBedAndNightstand(room, primarySpan.side, primarySpan.uMid);
 
-      // Bedside Nightstand + Interactive Bedside Table Lamp tucked beside the head of the bed!
-      const nsX = bedX + inwardSignXA * 1.04;
-      const nsZ = cornerA.z + zBackA * 1.35;
-      this.addBox(room, nsX, 0.32, nsZ, 0.52, 0.64, 0.48, [132, 92, 62]);
-      this.addBox(room, nsX, 0.42, nsZ + frontSignA * 0.26, 0.4, 0.2, 0.04, [158, 114, 78]);
-      this.addDeskLamp(room, nsX, 0.64, nsZ, 'Bedside Table Lamp');
-      this.addCollider(nsX, nsZ, 0.3, 0.28, room.floor);
+      // Other Walls: Tall Wooden Bookshelf, Bedroom Dresser, Wide Low Bookcase, Cozy Reading Armchair, Display Shelf!
+      const builders = [
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.24, s.maxW)),
+        (s) => this.addWallDresser(room, s.side, s.u, Math.min(1.24, s.maxW)),
+        (s) => this.addWallLowBookcase(room, s.side, s.u, Math.min(1.32, s.maxW)),
+        (s) => this.addWallArmchair(room, s.side, s.u, [142, 112, 178], [118, 88, 154]),
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.18, s.maxW)),
+        (s) => this.addWallDisplayShelf(room, s.side, s.u, Math.min(1.16, s.maxW)),
+      ];
+      wallSlots.slice(0, builders.length).forEach((slot, idx) => builders[idx](slot));
+    } else if (t === 'study') {
+      // Primary Wall: Executive Home Office Desk (flush against wall) with Monitor, Office Chair & Desk Lamp!
+      this.addWallOfficeDesk(room, primarySpan.side, primarySpan.uMid);
 
-      // Corner B: Bedroom Bookshelves (Tall Wooden Bookcase + Companion Low Bookcase along the side wall!)
-      this.addBookshelf(room, cornerB.x, cornerB.z, frontSignB, 1.24, 1.72);
-      const secondShelfZ = cornerB.z + frontSignB * 1.18;
-      if (Math.abs(secondShelfZ - room.doorCenters.east) > 1.35 && Math.abs(secondShelfZ - room.doorCenters.west) > 1.35) {
-        this.addBookshelf(room, cornerB.x, secondShelfZ, frontSignB, 0.92, 1.24);
-      }
+      // Other Walls: Multiple Tall Wooden Bookshelves flush against the walls, Low Credenza Bookcase, Reading Couch & Armchair!
+      const builders = [
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.26, s.maxW)),
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.26, s.maxW)),
+        (s) => this.addWallLowBookcase(room, s.side, s.u, Math.min(1.34, s.maxW)),
+        (s) => this.addWallArmchair(room, s.side, s.u, [168, 96, 78], [142, 76, 60]),
+        (s) => this.addWallDisplayShelf(room, s.side, s.u, Math.min(1.18, s.maxW)),
+        (s) => this.addWallCouch(room, s.side, s.u, [132, 92, 68], [110, 74, 52], false),
+      ];
+      wallSlots.slice(0, builders.length).forEach((slot, idx) => builders[idx](slot));
     } else if (t === 'kitchen') {
-      // Real-World Kitchen Layout (Compact, Ceramic Tile Floor with NO Rug, Perimeter Counter & Fridge, + Center Kitchen Island!):
-      // 1. Corner A: Perimeter Kitchen Counter with Stainless Sink, Faucet & Stove Cooktop
-      this.addBox(room, cornerA.x, 0.44, cornerA.z, 1.52, 0.88, 0.76, [224, 148, 82]);
-      this.addBox(room, cornerA.x, 0.92, cornerA.z, 1.6, 0.08, 0.82, [246, 244, 238]);
-      this.addBox(room, cornerA.x - 0.38, 0.985, cornerA.z, 0.48, 0.05, 0.44, [175, 192, 206]);
-      this.addBox(room, cornerA.x - 0.38, 1.12, cornerA.z + zBackA * 0.6, 0.06, 0.22, 0.06, [155, 168, 182]);
-      this.addBox(room, cornerA.x + 0.38, 0.98, cornerA.z, 0.52, 0.04, 0.48, [48, 52, 62]);
-      this.addCollider(cornerA.x, cornerA.z, 0.8, 0.44, room.floor);
+      // 1. Primary Wall: Fitted Kitchen Counter (Sink, Faucet, Stove Cooktop) + Tall Retro Refrigerator flush against wall!
+      this.addWallKitchenCounterAndFridge(room, primarySpan.side, primarySpan.uMid);
 
-      // 2. Corner B: Tall Retro Refrigerator
-      this.addBox(room, cornerB.x, 0.88, cornerB.z, 0.82, 1.76, 0.74, [238, 244, 248]);
-      this.addBox(room, cornerB.x, 1.24, cornerB.z + frontSignB * 0.39, 0.82, 0.04, 0.04, [170, 182, 194]);
-      this.addBox(room, cornerB.x - 0.28, 1.48, cornerB.z + frontSignB * 0.4, 0.05, 0.28, 0.06, [185, 196, 208]);
-      this.addBox(room, cornerB.x - 0.28, 0.82, cornerB.z + frontSignB * 0.4, 0.05, 0.44, 0.06, [185, 196, 208]);
-      this.addCollider(cornerB.x, cornerB.z, 0.45, 0.45, room.floor);
+      // 2. Other Walls: Kitchen Pantry & Dishware Hutch Shelf + Side Prep Counter Bookcase flush against walls!
+      const builders = [
+        (s) => this.addWallDisplayShelf(room, s.side, s.u, Math.min(1.2, s.maxW)),
+        (s) => this.addWallLowBookcase(room, s.side, s.u, Math.min(1.28, s.maxW)),
+        (s) => this.addWallDresser(room, s.side, s.u, Math.min(1.2, s.maxW)),
+      ];
+      wallSlots.slice(0, builders.length).forEach((slot, idx) => builders[idx](slot));
 
-      // 3. Center of the Kitchen: Kitchen Island with Overhang Butcher-Block Countertop & 2 Barstools!
+      // 3. Center of the Kitchen: Center Kitchen Island with Overhang Butcher-Block Countertop & 2 Barstools!
       const ix = room.cx;
       const iz = room.cz;
-      // Island shaker cabinet base
       this.addBox(room, ix, 0.43, iz, 1.46, 0.86, 0.78, [76, 112, 134]);
-      // Cream marble / butcher-block overhang countertop sitting cleanly on top (y = 0.86 to 0.94)
       this.addBox(room, ix, 0.9, iz, 1.64, 0.08, 0.94, [248, 245, 238]);
-      // Wooden cutting board & fruit accent on top of the island
       this.addBox(room, ix - 0.32, 0.96, iz + 0.06, 0.42, 0.04, 0.3, [196, 140, 86]);
       this.addBox(room, ix + 0.28, 0.98, iz - 0.04, 0.26, 0.08, 0.26, [224, 92, 74]);
-      // Two Breakfast Barstools tucked cleanly along one side of the island
       for (const stoolOffset of [-0.42, 0.42]) {
         const sx = ix + stoolOffset;
         const sz = iz - 0.56;
@@ -1190,50 +1518,30 @@ export class ProceduralHouse {
         this.addBox(room, sx, 0.595, sz, 0.34, 0.07, 0.34, [218, 128, 72]);
       }
       this.addCollider(ix, iz - 0.06, 0.84, 0.58, room.floor);
-    } else if (t === 'study') {
-      // Real-World Home Office Layout:
-      // 1. Corner A: Twin Tall Wooden Office Bookshelves lined with colorful book rows!
-      this.addBookshelf(room, cornerA.x, cornerA.z, frontSignA, 1.26, 1.78);
-      const secondBookcaseZ = cornerA.z + frontSignA * 1.22;
-      if (Math.abs(secondBookcaseZ - room.doorCenters.east) > 1.35 && Math.abs(secondBookcaseZ - room.doorCenters.west) > 1.35) {
-        this.addBookshelf(room, cornerA.x, secondBookcaseZ, frontSignA, 1.12, 1.78);
-      }
-
-      // 2. Corner B: Executive Home Office Desk with Drawer Pedestals, Desktop Computer Monitor, Office Chair & Desk Lamp!
-      // Left and right drawer pedestals supporting the desktop (y = 0 to 0.70)
-      this.addBox(room, cornerB.x - 0.46, 0.35, cornerB.z, 0.36, 0.7, 0.66, [138, 92, 56]);
-      this.addBox(room, cornerB.x + 0.46, 0.35, cornerB.z, 0.36, 0.7, 0.66, [138, 92, 56]);
-      // Wide walnut desktop sitting cleanly on top (y = 0.70 to 0.78)
-      this.addBox(room, cornerB.x, 0.74, cornerB.z, 1.36, 0.08, 0.72, [168, 116, 72]);
-      // Desktop Computer Monitor (stand + bezel + glowing screen) on one side of the desk
-      const monX = cornerB.x - 0.24;
-      const monZ = cornerB.z - frontSignB * 0.14;
-      this.addBox(room, monX, 0.83, monZ, 0.12, 0.1, 0.1, [48, 52, 62]);
-      this.addBox(room, monX, 1.02, monZ, 0.54, 0.34, 0.05, [38, 42, 52]);
-      this.addBox(room, monX, 1.02, monZ + frontSignB * 0.035, 0.48, 0.28, 0.02, [86, 168, 224], { emissive: true });
-      // Interactive Desk Lamp on the other side of the desk
-      this.addDeskLamp(room, cornerB.x + 0.36, 0.78, cornerB.z, 'Office Desk Lamp');
-      // Ergonomic Office Chair tucked in front of the desk
-      const chairZ = cornerB.z + frontSignB * 0.54;
-      this.addBox(room, cornerB.x, 0.21, chairZ, 0.14, 0.42, 0.14, [58, 62, 72]);
-      this.addBox(room, cornerB.x, 0.46, chairZ, 0.46, 0.08, 0.44, [68, 108, 148]);
-      this.addBox(room, cornerB.x, 0.71, chairZ + frontSignB * 0.18, 0.44, 0.42, 0.08, [58, 94, 132]);
-      this.addCollider(cornerB.x, cornerB.z + frontSignB * 0.12, 0.7, 0.52, room.floor);
     } else if (t === 'playroom' || t === 'music' || t === 'loft' || t === 'sunroom') {
-      // Corner A: Tall Bookshelf / Cubby Storage with Colorful Books
-      this.addBookshelf(room, cornerA.x, cornerA.z, frontSignA, 1.24, 1.68);
+      // Primary Wall: Craft & Activity Desk flush against wall with Chair & Desk Lamp!
+      this.addWallOfficeDesk(room, primarySpan.side, primarySpan.uMid);
 
-      // Corner B: Craft & Activity Desk + Interactive Desk Lamp!
-      this.addBox(room, cornerB.x, 0.38, cornerB.z, 1.18, 0.76, 0.68, [178, 126, 78]);
-      this.addDeskLamp(room, cornerB.x, 0.76, cornerB.z, 'Desk Lamp');
-      this.addCollider(cornerB.x, cornerB.z, 0.62, 0.38, room.floor);
+      // Other Walls: Tall Bookshelf, Tiered Toy & Craft Cubby Shelf, Plush Lounge Couch, Cozy Armchair, Low Bookcase!
+      const builders = [
+        (s) => this.addWallDisplayShelf(room, s.side, s.u, Math.min(1.2, s.maxW)),
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.24, s.maxW)),
+        (s) => this.addWallCouch(room, s.side, s.u, [86, 162, 118], [68, 138, 96], false),
+        (s) => this.addWallArmchair(room, s.side, s.u, [224, 148, 78], [196, 122, 58]),
+        (s) => this.addWallLowBookcase(room, s.side, s.u, Math.min(1.32, s.maxW)),
+      ];
+      wallSlots.slice(0, builders.length).forEach((slot, idx) => builders[idx](slot));
     } else {
-      // Foyer / Hallway: Entryway Console Table + Table Lamp + Potted Houseplant
-      this.addBox(room, cornerA.x, 0.4, cornerA.z, 1.18, 0.8, 0.54, [164, 112, 72]);
-      this.addDeskLamp(room, cornerA.x, 0.8, cornerA.z, 'Entry Table Lamp');
-      this.addCollider(cornerA.x, cornerA.z, 0.62, 0.32, room.floor);
+      // Foyer / Front Hallway: Entryway Console Table with Entry Table Lamp, Low Bookcase Credenza & Hallway Armchair flush against walls!
+      this.addWallDresser(room, primarySpan.side, primarySpan.uMid, 1.22);
+      this.addWallDeskLamp(room, primarySpan.side, primarySpan.uMid - 0.28, 0.26, 0.9, 'Entry Table Lamp');
 
-      this.addPottedPlant(room, cornerB.x, cornerB.z);
+      const builders = [
+        (s) => this.addWallLowBookcase(room, s.side, s.u, Math.min(1.3, s.maxW)),
+        (s) => this.addWallArmchair(room, s.side, s.u, [184, 92, 78], [156, 72, 60]),
+        (s) => this.addWallTallBookshelf(room, s.side, s.u, Math.min(1.18, s.maxW)),
+      ];
+      wallSlots.slice(0, builders.length).forEach((slot, idx) => builders[idx](slot));
     }
   }
 
