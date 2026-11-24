@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Fan &amp; Light House Explorer</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!-- 3D Viewport Canvas -->
+  <canvas id="game-canvas" aria-label="3D House Explorer View"></canvas>
+
+  <!-- Center Crosshair & Look Reticle -->
+  <div id="reticle" aria-hidden="true">
+    <div class="reticle-dot"></div>
+    <div class="reticle-ring"></div>
+  </div>
+
+  <!-- Top Left: House Level & Room Badge -->
+  <header id="hud-top-left">
+    <div class="house-badge">
+      <span class="house-icon">🏠</span>
+      <div>
+        <div id="house-title" class="house-title">House #1 — Sunny Cottage</div>
+        <div id="current-room" class="current-room">📍 Foyer</div>
+      </div>
+    </div>
+    <div class="stats-bar">
+      <div class="stat-pill" title="Active Lights in House">
+        <span>💡 Lights ON:</span>
+        <strong id="lights-count">0 / 0</strong>
+      </div>
+      <div class="stat-pill" title="Spinning Fans in House">
+        <span>🌀 Fans Spinning:</span>
+        <strong id="fans-count">0 / 0</strong>
+      </div>
+    </div>
+  </header>
+
+  <!-- Top Right: House Helper Checklist -->
+  <aside id="checklist-panel" aria-label="House Helper Checklist">
+    <div class="checklist-header">
+      <span class="checklist-icon">📋</span>
+      <div>
+        <h2>House Helper Goals</h2>
+        <p id="checklist-subtitle">Finish all tasks to unlock the green exit door!</p>
+      </div>
+    </div>
+    <ul id="checklist-items" class="checklist-items"></ul>
+    <div id="exit-unlocked-banner" class="exit-unlocked-banner" hidden>
+      🎉 All done! Walk to the glowing <strong>Front Exit Door</strong> or press <kbd>N</kbd> for Next House!
+    </div>
+  </aside>
+
+  <!-- Center Bottom: Big Friendly Interaction Prompt -->
+  <div id="interaction-prompt" class="interaction-prompt" hidden>
+    <div class="prompt-icon" id="prompt-icon">🌀</div>
+    <div class="prompt-body">
+      <div class="prompt-title" id="prompt-title">Living Room Ceiling Fan</div>
+      <div class="prompt-state" id="prompt-state">Speed: OFF</div>
+      <div class="prompt-hint" id="prompt-hint">Click or press <kbd>SPACE</kbd> / <kbd>E</kbd> to change</div>
+    </div>
+  </div>
+
+  <!-- Bottom Left: Minimap & Quick Controls -->
+  <div id="hud-bottom-left">
+    <canvas id="minimap-canvas" width="170" height="170" aria-label="House Floorplan Minimap"></canvas>
+    <div class="minimap-legend">
+      <span><i class="dot dot-fan"></i> Fan</span>
+      <span><i class="dot dot-light"></i> Light</span>
+      <span><i class="dot dot-exit"></i> Exit</span>
+    </div>
+  </div>
+
+  <!-- Bottom Right: Kid-Friendly Action Buttons (Great for Mouse / iPad / Quick Play) -->
+  <div id="hud-bottom-right">
+    <div class="quick-controls">
+      <button id="btn-interact" class="action-btn primary-btn" type="button" title="Toggle Nearest Fan or Light (Space / E)">
+        ✨ Use Fan / Light <kbd>SPACE</kbd>
+      </button>
+      <div class="sub-buttons">
+        <button id="btn-flashlight" class="action-btn" type="button" title="Toggle Personal Flashlight (F)">
+          🔦 Flashlight <kbd>F</kbd>
+        </button>
+        <button id="btn-new-house" class="action-btn" type="button" title="Generate a Brand New House (N)">
+          🎲 New House <kbd>N</kbd>
+        </button>
+        <button id="btn-help" class="action-btn" type="button" title="Show Controls &amp; Welcome Screen (H)">
+          ❓ Controls
+        </button>
+      </div>
+    </div>
+    <div id="gamepad-indicator" class="gamepad-indicator" hidden>
+      🎮 Gamepad Connected
+    </div>
+  </div>
+
+  <!-- Touch On-Screen D-Pad for iPad / Touchscreens (or Mouse clicking) -->
+  <div id="touch-controls" aria-label="Movement Controls">
+    <button class="dpad-btn dpad-up" data-move="forward" type="button" aria-label="Walk Forward">▲</button>
+    <div class="dpad-middle">
+      <button class="dpad-btn dpad-left" data-move="turnLeft" type="button" aria-label="Turn Left">◀</button>
+      <button class="dpad-btn dpad-down" data-move="backward" type="button" aria-label="Walk Backward">▼</button>
+      <button class="dpad-btn dpad-right" data-move="turnRight" type="button" aria-label="Turn Right">▶</button>
+    </div>
+  </div>
+
+  <!-- Welcome / Controls Modal Dialog -->
+  <dialog id="welcome-dialog" class="game-dialog">
+    <div class="dialog-card">
+      <div class="dialog-badge">🌀 💡 🏠</div>
+      <h1>Fan &amp; Light House Explorer</h1>
+      <p class="dialog-lead">
+        Explore cozy, randomized houses filled with ceiling fans, standing fans, box fans, wall switches, and glowing lamps!
+      </p>
+
+      <div class="controls-grid">
+        <div class="control-box">
+          <div class="control-title">🚶‍♂️ Walk &amp; Look</div>
+          <ul>
+            <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to walk &amp; strafe</li>
+            <li><kbd>Arrow Keys</kbd> (or <strong>Drag Mouse</strong>) to look around</li>
+            <li><kbd>Q</kbd> / <kbd>E</kbd> or <kbd>◀</kbd> / <kbd>▶</kbd> to turn left &amp; right</li>
+          </ul>
+        </div>
+        <div class="control-box">
+          <div class="control-title">🌀 Fans &amp; 💡 Lights</div>
+          <ul>
+            <li><strong>Click directly</strong> on any fan, pull-chain, lamp, or wall switch!</li>
+            <li>Or stand close and press <kbd>SPACE</kbd></li>
+            <li>Fans have 4 speeds: <strong>OFF → LOW → MED → HIGH</strong></li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="dialog-footer">
+        <button id="btn-start-game" class="start-btn" type="button" autofocus>
+          🚪 Enter the House!
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Level Cleared Celebration Dialog -->
+  <dialog id="victory-dialog" class="game-dialog">
+    <div class="dialog-card victory-card">
+      <div class="dialog-badge">🎉 ⭐ 🏆</div>
+      <h1 id="victory-title">House #1 Complete!</h1>
+      <p id="victory-summary" class="dialog-lead">
+        Awesome job! Every fan and light on the checklist is set just right!
+      </p>
+      <div class="victory-stats" id="victory-stats"></div>
+      <div class="dialog-footer">
+        <button id="btn-next-level" class="start-btn" type="button" autofocus>
+          🏠 Explore Next Procedural House!
+        </button>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./src/main.js?v=4"></script>
+</body>
+</html>
